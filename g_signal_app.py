@@ -376,61 +376,93 @@ def g_score(row) -> tuple[float, list]:
     return s, detail
 
 
-def calc_scores(g_raw: float, f1_ok: bool,
-                avg_price: float, close: float, atr: float) -> dict:
+def calc_scores_from_percentile(pct: float, f1_ok: bool,
+                                avg_price: float, close: float) -> dict:
     """
-    G 원점수 → 매수/홀딩/매도 % 변환
-    v1b 전략 기반: Top10, -8% 손절, 20거래일 보유
+    유니버스 백분위 → 매수/홀딩/매도 % 변환
+    pct: 0~100 (높을수록 유니버스 내 상위)
+    백테스트와 동일한 상대순위 기반 (3자 합의: Claude+GPT+Gemini)
+
+    기준:
+      상위 10% (pct >= 90): 강한 매수 후보
+      상위 20% (pct >= 80): 매수 후보
+      상위 40% (pct >= 60): 보유 가능
+      상위 40% 밖 (pct < 60): 신규매수 부적합
     """
-    # F1 필터 ON이면 매수 금지
+    # F1 필터 ON → 매수 상한 20점
     if not f1_ok:
-        return {'buy': 5, 'hold': 20, 'sell': 75,
-                'verdict': 'filter',
-                'verdict_text': '금리충격 필터 ON — 신규 매수 신호 비활성화 구간'}
+        return {
+            'buy': 5, 'hold': 15, 'sell': 80,
+            'percentile': pct,
+            'verdict': 'filter',
+            'verdict_text': '⚠️ 금리충격 필터 ON — 신규 매수 비활성화 (10년물 금리 급등 구간)'
+        }
 
-    # G 점수 정규화 (이론 범위: -65 ~ +110)
-    g_norm = (g_raw + 65) / 175  # 0~1로 정규화
-    g_norm = max(0.0, min(1.0, g_norm))
-
-    # 기본 매수 점수
-    buy_raw = g_norm * 100
-
-    # 보유 종목 손절 위험 반영
-    sell_extra = 0
-    if avg_price and avg_price > 0:
-        pnl = (close - avg_price) / avg_price
-        if pnl <= -0.08:
-            sell_extra = 60   # 손절 트리거
-        elif pnl <= -0.05:
-            sell_extra = 30   # 손절 주의
-        elif pnl >= 0.15:
-            sell_extra = 20   # 익절 고려
-
-    # 최종 점수 산출
-    buy_score  = max(0, buy_raw - sell_extra * 0.5)
-    sell_score = max(0, (100 - buy_raw) * 0.6 + sell_extra * 0.4)
+    # 백분위 기반 매수 점수
+    buy_score  = pct                          # 백분위 그대로
+    sell_score = max(0, (100 - pct) * 0.6)
     hold_score = max(0, 100 - buy_score - sell_score)
 
-    # 정규화
     total = buy_score + hold_score + sell_score
     if total == 0: total = 1
     buy_pct  = round(buy_score  / total * 100)
     hold_pct = round(hold_score / total * 100)
     sell_pct = round(100 - buy_pct - hold_pct)
 
-    # 판정
-    if buy_pct >= 50:
-        verdict = 'buy'
-        verdict_text = '매수 적합 — G 신호 상위권, 20거래일 스윙 진입 고려 가능'
-    elif sell_pct >= 50:
-        verdict = 'sell'
-        verdict_text = '매도/관망 — G 신호 하위권, 신규 진입 보류'
-    else:
-        verdict = 'hold'
-        verdict_text = '홀딩/관망 — 명확한 신호 없음, 기존 보유자는 유지'
+    # 보유 종목 손절 반영
+    if avg_price and avg_price > 0:
+        pnl = (close - avg_price) / avg_price
+        if pnl <= -0.08:
+            return {
+                'buy': 0, 'hold': 10, 'sell': 90,
+                'percentile': pct,
+                'verdict': 'sell',
+                'verdict_text': '🚨 손절선 -8% 이탈 — 즉시 매도 검토'
+            }
+        elif pnl <= -0.05:
+            sell_pct = min(100, sell_pct + 20)
+            buy_pct  = max(0,  buy_pct  - 15)
+            hold_pct = 100 - buy_pct - sell_pct
+        elif pnl >= 0.15:
+            sell_pct = min(100, sell_pct + 15)
+            buy_pct  = max(0,  buy_pct  - 10)
+            hold_pct = 100 - buy_pct - sell_pct
 
-    return {'buy': buy_pct, 'hold': hold_pct, 'sell': sell_pct,
-            'verdict': verdict, 'verdict_text': verdict_text}
+    # 판정
+    if pct >= 90:
+        verdict = 'buy'
+        verdict_text = '🟢 강한 매수 후보 — 유니버스 상위 10%, 20거래일 스윙 진입 적합'
+    elif pct >= 80:
+        verdict = 'buy'
+        verdict_text = '🟢 매수 후보 — 유니버스 상위 20%, 진입 고려 가능'
+    elif pct >= 60:
+        verdict = 'hold'
+        verdict_text = '🟡 보유 가능 — 유니버스 상위 40%, 신규 진입보다 기존 보유 유지'
+    else:
+        verdict = 'sell'
+        verdict_text = '🔴 신규매수 부적합 — 유니버스 하위 60%, 관망 권장'
+
+    return {
+        'buy': buy_pct, 'hold': hold_pct, 'sell': sell_pct,
+        'percentile': round(pct, 1),
+        'verdict': verdict, 'verdict_text': verdict_text
+    }
+
+
+def calc_scores(g_raw: float, f1_ok: bool,
+                avg_price: float, close: float, atr: float,
+                universe_pct: float = None) -> dict:
+    """
+    하위 호환용 래퍼 — 단일 종목 조회 시 universe_pct 없으면
+    G 원점수를 임시 백분위로 변환 (스캔 후 재계산 권장)
+    """
+    if universe_pct is not None:
+        return calc_scores_from_percentile(universe_pct, f1_ok, avg_price, close)
+
+    # 단일 종목 조회 시: G 원점수 기반 임시 백분위 (±65~110 범위 정규화)
+    tmp_pct = (g_raw + 65) / 175 * 100
+    tmp_pct = max(0.0, min(100.0, tmp_pct))
+    return calc_scores_from_percentile(tmp_pct, f1_ok, avg_price, close)
 
 
 
@@ -438,33 +470,100 @@ def calc_scores(g_raw: float, f1_ok: bool,
 # 스캐너 종목 리스트
 # ══════════════════════════════════════════════════════════
 SCAN_US = {
-    'AAPL':'Apple', 'MSFT':'Microsoft', 'NVDA':'NVIDIA', 'GOOGL':'Alphabet',
-    'META':'Meta', 'AMZN':'Amazon', 'JPM':'JPMorgan', 'BAC':'BofA',
-    'GS':'Goldman', 'WFC':'Wells Fargo', 'JNJ':'J&J', 'UNH':'UnitedHealth',
-    'PFE':'Pfizer', 'ABT':'Abbott', 'XOM':'ExxonMobil', 'CVX':'Chevron',
-    'WMT':'Walmart', 'HD':'Home Depot', 'MCD':"McDonald's", 'NKE':'Nike',
-    'CAT':'Caterpillar', 'HON':'Honeywell', 'UPS':'UPS', 'NEE':'NextEra',
-    'AMT':'AmericanTower', 'LIN':'Linde', 'APD':'AirProducts',
-    'VZ':'Verizon', 'T':'AT&T', 'DIS':'Disney',
+    # IT/반도체
+    'AAPL':'Apple', 'MSFT':'Microsoft', 'NVDA':'NVIDIA', 'AVGO':'Broadcom',
+    'AMD':'AMD', 'INTC':'Intel', 'QCOM':'Qualcomm', 'TXN':'Texas Instruments',
+    'MU':'Micron', 'AMAT':'Applied Materials', 'LRCX':'Lam Research',
+    'KLAC':'KLA Corp', 'ADI':'Analog Devices', 'MRVL':'Marvell',
+    'ORCL':'Oracle', 'CRM':'Salesforce', 'NOW':'ServiceNow', 'INTU':'Intuit',
+    'ADBE':'Adobe', 'PANW':'Palo Alto', 'CRWD':'CrowdStrike',
+    'FTNT':'Fortinet', 'IBM':'IBM', 'HPQ':'HP', 'DELL':'Dell',
+    # 통신/미디어
+    'GOOGL':'Alphabet', 'META':'Meta', 'NFLX':'Netflix', 'DIS':'Disney',
+    'CMCSA':'Comcast', 'T':'AT&T', 'VZ':'Verizon', 'TMUS':'T-Mobile',
+    # 임의소비재
+    'AMZN':'Amazon', 'TSLA':'Tesla', 'HD':'Home Depot', 'LOW':"Lowe's",
+    'TGT':'Target', 'WMT':'Walmart', 'COST':'Costco', 'MCD':"McDonald's",
+    'SBUX':'Starbucks', 'NKE':'Nike', 'BKNG':'Booking', 'UBER':'Uber',
+    # 필수소비재
+    'PG':'P&G', 'KO':'Coca-Cola', 'PEP':'PepsiCo', 'PM':'Philip Morris',
+    'MO':'Altria', 'CL':'Colgate', 'GIS':'General Mills', 'SYY':'Sysco',
+    # 헬스케어
+    'LLY':'Eli Lilly', 'JNJ':'J&J', 'UNH':'UnitedHealth', 'ABBV':'AbbVie',
+    'MRK':'Merck', 'PFE':'Pfizer', 'BMY':'BMS', 'AMGN':'Amgen',
+    'GILD':'Gilead', 'REGN':'Regeneron', 'VRTX':'Vertex', 'ISRG':'Intuitive',
+    'SYK':'Stryker', 'MDT':'Medtronic', 'ABT':'Abbott', 'BSX':'Boston Sci',
+    'TMO':'Thermo Fisher', 'DHR':'Danaher',
+    # 금융
+    'JPM':'JPMorgan', 'BAC':'BofA', 'WFC':'Wells Fargo', 'GS':'Goldman',
+    'MS':'Morgan Stanley', 'C':'Citigroup', 'AXP':'AmEx', 'BLK':'BlackRock',
+    'SCHW':'Schwab', 'V':'Visa', 'MA':'Mastercard', 'PYPL':'PayPal',
+    'COF':'Capital One', 'USB':'US Bancorp', 'PNC':'PNC Financial',
+    'CB':'Chubb', 'PGR':'Progressive',
+    # 에너지
+    'XOM':'ExxonMobil', 'CVX':'Chevron', 'COP':'ConocoPhillips',
+    'EOG':'EOG Resources', 'SLB':'SLB', 'MPC':'Marathon Pet',
+    'PSX':'Phillips 66', 'VLO':'Valero', 'OXY':'Occidental',
+    # 산업재
+    'CAT':'Caterpillar', 'HON':'Honeywell', 'UPS':'UPS', 'RTX':'RTX',
+    'LMT':'Lockheed', 'BA':'Boeing', 'GE':'GE', 'MMM':'3M',
+    'DE':'Deere', 'ETN':'Eaton', 'FDX':'FedEx', 'UNP':'Union Pacific',
+    'WM':'Waste Mgmt', 'NSC':'Norfolk Southern', 'CSX':'CSX',
+    # 소재
+    'LIN':'Linde', 'APD':'Air Products', 'SHW':'Sherwin-Williams',
+    'ECL':'Ecolab', 'NEM':'Newmont', 'FCX':'Freeport', 'NUE':'Nucor',
+    # 유틸리티
+    'NEE':'NextEra', 'DUK':'Duke Energy', 'SO':'Southern', 'D':'Dominion',
+    'AEP':'AEP', 'EXC':'Exelon', 'SRE':'Sempra',
+    # 부동산
+    'AMT':'American Tower', 'PLD':'Prologis', 'EQIX':'Equinix',
+    'CCI':'Crown Castle', 'SPG':'Simon Property', 'O':'Realty Income',
 }
 
 SCAN_KR = {
-    '005930.KS':'삼성전자', '000660.KS':'SK하이닉스', '035420.KS':'NAVER',
-    '005380.KS':'현대차', '051910.KS':'LG화학', '006400.KS':'삼성SDI',
-    '035720.KS':'카카오', '003550.KS':'LG', '012330.KS':'현대모비스',
-    '066570.KS':'LG전자', '032830.KS':'삼성생명', '017670.KS':'SK텔레콤',
-    '030200.KS':'KT', '096770.KS':'SK이노베이션', '009150.KS':'삼성전기',
-    '034730.KS':'SK', '011200.KS':'HMM', '010130.KS':'고려아연',
-    '028260.KS':'삼성물산', '018260.KS':'삼성SDS',
+    # 반도체/IT
+    '005930.KS':'삼성전자', '000660.KS':'SK하이닉스', '009150.KS':'삼성전기',
+    '066570.KS':'LG전자', '034730.KS':'SK', '018260.KS':'삼성SDS',
+    '035420.KS':'NAVER', '035720.KS':'카카오', '036570.KS':'엔씨소프트',
+    # 자동차/기계/조선
+    '005380.KS':'현대차', '000270.KS':'기아', '012330.KS':'현대모비스',
+    '064350.KS':'현대로템', '042660.KS':'한화오션', '009540.KS':'HD한국조선해양',
+    '010140.KS':'삼성중공업', '329180.KS':'HD현대', '241560.KS':'두산밥캣',
+    # 화학/배터리/소재
+    '051910.KS':'LG화학', '006400.KS':'삼성SDI', '096770.KS':'SK이노베이션',
+    '011170.KS':'롯데케미칼', '010950.KS':'S-Oil', '010130.KS':'고려아연',
+    '004020.KS':'현대제철', '005490.KS':'POSCO홀딩스', '003670.KS':'포스코퓨처엠',
+    '247540.KS':'에코프로비엠', '086520.KS':'에코프로',
+    # 금융
+    '105560.KS':'KB금융', '055550.KS':'신한지주', '086790.KS':'하나금융',
+    '032830.KS':'삼성생명', '000810.KS':'삼성화재', '316140.KS':'우리금융',
+    '024110.KS':'기업은행',
+    # 통신
+    '017670.KS':'SK텔레콤', '030200.KS':'KT', '032640.KS':'LG유플러스',
+    # 유통/소비재
+    '028260.KS':'삼성물산', '003550.KS':'LG', '069960.KS':'현대백화점',
+    '004170.KS':'신세계', '023530.KS':'롯데쇼핑', '271560.KS':'오리온',
+    '097950.KS':'CJ제일제당', '001040.KS':'CJ',
+    # 건설/엔지니어링
+    '000720.KS':'현대건설', '028050.KS':'삼성엔지니어링', '034020.KS':'두산에너빌리티',
+    # 바이오/헬스
+    '068270.KS':'셀트리온', '207940.KS':'삼성바이오로직스', '128940.KS':'한미약품',
+    '000100.KS':'유한양행', '185750.KS':'종근당',
+    # 항공/물류
+    '003490.KS':'대한항공', '011200.KS':'HMM', '000120.KS':'CJ대한통운',
 }
 
 
 @st.cache_data(ttl=600)
 def scan_market(market: str) -> pd.DataFrame:
-    """전체 종목 스캔 — 매수 적합도 계산"""
+    """
+    전체 종목 스캔 — G 원점수 계산 후 유니버스 백분위 변환
+    백테스트와 동일한 상대순위 기반 (3자 합의)
+    """
     tickers = SCAN_US if market == 'US' else SCAN_KR
-    f1_ok, _ = check_f1()
+    f1_ok, tnx_change = check_f1()
 
+    # 1단계: 전 종목 G 원점수 수집
     rows = []
     for ticker, name in tickers.items():
         try:
@@ -475,28 +574,47 @@ def scan_market(market: str) -> pd.DataFrame:
             row = d.iloc[-1]
             if pd.isna(row['price_pos20']) or pd.isna(row['bbw_pct20']):
                 continue
-            close = float(row['Close'])
-            atr   = float(row['atr']) if not pd.isna(row['atr']) else 0
+            close    = float(row['Close'])
+            atr_val  = float(row['atr']) if not pd.isna(row['atr']) else 0
             g_raw, _ = g_score(row)
-            sc = calc_scores(g_raw, f1_ok, None, close, atr)
             rows.append({
-                'ticker':   ticker,
-                'name':     name,
-                'close':    close,
-                'buy_pct':  sc['buy'],
-                'hold_pct': sc['hold'],
-                'sell_pct': sc['sell'],
-                'g_raw':    round(g_raw, 1),
-                'rsi':      round(row['rsi'], 1) if not pd.isna(row['rsi']) else None,
-                'vol_ratio':round(row['vol_ratio'], 2) if not pd.isna(row['vol_ratio']) else None,
-                'verdict':  sc['verdict'],
+                'ticker':    ticker,
+                'name':      name,
+                'close':     close,
+                'g_raw':     g_raw,
+                'rsi':       round(row['rsi'], 1) if not pd.isna(row['rsi']) else None,
+                'vol_ratio': round(row['vol_ratio'], 2) if not pd.isna(row['vol_ratio']) else None,
+                'sma20_ok':  int(row['Close'] > row['sma20']) if not pd.isna(row['sma20']) else 0,
+                'date':      d.index[-1].strftime('%Y-%m-%d'),
             })
         except Exception:
             continue
 
     if not rows:
         return pd.DataFrame()
-    df_result = pd.DataFrame(rows).sort_values('buy_pct', ascending=False).reset_index(drop=True)
+
+    df_all = pd.DataFrame(rows)
+
+    # 2단계: 유니버스 내 백분위 계산 (핵심 — 백테스트와 동일한 상대순위)
+    g_series = df_all['g_raw']
+    df_all['percentile'] = g_series.rank(pct=True) * 100  # 0~100
+
+    # 3단계: 백분위 → 매수/홀딩/매도 점수 변환
+    def row_to_scores(r):
+        sc = calc_scores_from_percentile(r['percentile'], f1_ok, None, r['close'])
+        return pd.Series({
+            'buy_pct':    sc['buy'],
+            'hold_pct':   sc['hold'],
+            'sell_pct':   sc['sell'],
+            'verdict':    sc['verdict'],
+        })
+
+    scores = df_all.apply(row_to_scores, axis=1)
+    df_all = pd.concat([df_all, scores], axis=1)
+
+    df_result = df_all.sort_values('percentile', ascending=False).reset_index(drop=True)
+    df_result['rank'] = range(1, len(df_result) + 1)
+    df_result['total'] = len(df_result)
     return df_result
 
 # ══════════════════════════════════════════════════════════
@@ -734,9 +852,29 @@ def main():
     close = float(row['Close'])
     atr   = float(row['atr']) if not pd.isna(row['atr']) else 0
 
-    # G 점수
+    # G 점수 + 유니버스 백분위 계산 (3자 합의: 백테스트와 동일한 상대순위)
     g_raw, g_detail = g_score(row)
-    scores = calc_scores(g_raw, f1_ok, avg_price if has_pos else None, close, atr)
+
+    # 유니버스 판별 (KS = 국내, 나머지 = 미국)
+    market = 'KR' if ticker.endswith('.KS') or ticker.endswith('.KQ') else 'US'
+
+    # 유니버스 스캔으로 실제 백분위 계산
+    with st.spinner(f"유니버스 백분위 계산 중 ({"국내" if market=="KR" else "미국"} {"62" if market=="KR" else "155"}종목)..."):
+        df_universe = scan_market(market)
+
+    universe_pct  = 50.0   # 기본값
+    universe_rank = None
+    universe_total = None
+
+    if not df_universe.empty:
+        # 전체 유니버스 G 원점수 중 해당 종목 위치 계산
+        all_g_scores = df_universe['g_raw'].values
+        universe_pct  = float((all_g_scores < g_raw).sum() / len(all_g_scores) * 100)
+        universe_rank = int((all_g_scores >= g_raw).sum())
+        universe_total = len(all_g_scores)
+
+    scores = calc_scores(g_raw, f1_ok, avg_price if has_pos else None, close, atr,
+                         universe_pct=universe_pct)
 
     # ── 헤더 ──────────────────────────────────────────────
     h1, h2, h3, h4 = st.columns([2, 1, 1, 1])
@@ -762,12 +900,60 @@ def main():
 
     st.divider()
 
-    # ── F1 필터 상태 ───────────────────────────────────────
-    if not np.isnan(tnx_change):
-        if f1_ok:
-            st.markdown(f'<div class="f1-box f1-ok">✅ 금리충격 필터 OFF — 매수 신호 활성 (10Y금리 60일 변화: {tnx_change:+.2f}%p)</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="f1-box f1-warn">⚠️ 금리충격 필터 ON — 신규 매수 비활성 (10Y금리 60일 변화: {tnx_change:+.2f}%p ＞ +0.75%p)</div>', unsafe_allow_html=True)
+    # ── F1 필터 대시보드 (Gemini 제안 반영) ───────────────────
+    f1_color     = '#166534' if f1_ok else '#92400e'
+    f1_bg        = '#0f2d1a' if f1_ok else '#2d1a00'
+    f1_icon      = '✅' if f1_ok else '⚠️'
+    f1_status    = 'OFF — 매수 신호 활성' if f1_ok else 'ON — 신규 매수 비활성화'
+    f1_bar_pct   = min(100, abs(tnx_change) / 0.75 * 100) if not np.isnan(tnx_change) else 0
+    f1_bar_color = '#22c55e' if f1_ok else '#ef4444'
+    f1_tnx_str   = f'{tnx_change:+.2f}%p' if not np.isnan(tnx_change) else 'N/A'
+    f1_remain    = (f'+{0.75 - tnx_change:.2f}%p 여유' if f1_ok and not np.isnan(tnx_change)
+                    else (f'{tnx_change:+.2f}%p — 임계값 초과' if not f1_ok else '데이터 확인 중'))
+
+    st.markdown(f"""
+    <div style='background:{f1_bg};border:1px solid {f1_color};border-radius:10px;
+        padding:0.8rem 1.2rem;margin-bottom:1rem'>
+        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px'>
+            <span style='font-weight:600;color:#e2e8f0;font-size:0.92rem'>
+                {f1_icon} 금리충격 필터 (F1) &nbsp;{f1_status}
+            </span>
+            <span style='font-family:Space Mono,monospace;font-size:0.78rem;color:#94a3b8'>
+                10Y금리 60일 변화 {f1_tnx_str} / 임계값 +0.75%p
+            </span>
+        </div>
+        <div style='background:#1e2a3a;border-radius:4px;height:5px;overflow:hidden'>
+            <div style='background:{f1_bar_color};width:{f1_bar_pct:.0f}%;height:5px;border-radius:4px'></div>
+        </div>
+        <div style='font-size:0.72rem;color:#64748b;margin-top:4px'>{f1_remain}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 유니버스 순위 배너 ────────────────────────────────
+    if universe_rank is not None:
+        rank_pct  = round(universe_pct, 1)
+        rank_color = '#22c55e' if rank_pct >= 80 else ('#eab308' if rank_pct >= 60 else '#ef4444')
+        tier = ('강한 매수 후보 (상위 10%)' if rank_pct >= 90 else
+                '매수 후보 (상위 20%)' if rank_pct >= 80 else
+                '보유 가능 (상위 40%)' if rank_pct >= 60 else
+                '신규매수 부적합')
+        market_label = '국내' if market == 'KR' else '미국'
+        st.markdown(f"""
+        <div style='background:#0f1623;border:1px solid #1e2a3a;border-radius:8px;
+            padding:0.7rem 1.2rem;margin-bottom:0.8rem;
+            display:flex;justify-content:space-between;align-items:center'>
+            <span style='font-size:0.85rem;color:#94a3b8'>
+                {market_label} {universe_total}종목 유니버스 내 순위
+            </span>
+            <span>
+                <span style='font-family:Space Mono,monospace;font-size:1.1rem;
+                    font-weight:700;color:{rank_color}'>{universe_rank}위</span>
+                <span style='color:#475569;font-size:0.8rem'> / {universe_total}종목</span>
+                <span style='margin-left:10px;background:#1e2a3a;padding:2px 8px;
+                    border-radius:12px;font-size:0.78rem;color:{rank_color}'>{tier}</span>
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ── 점수 카드 ─────────────────────────────────────────
     st.markdown(f"""
@@ -775,7 +961,7 @@ def main():
         <div class="score-card card-buy">
             <div class="score-label">매수 적합도</div>
             <div class="score-num-buy">{scores['buy']}%</div>
-            <div class="score-sub">스윙 진입 신호</div>
+            <div class="score-sub">유니버스 백분위 {round(universe_pct,1)}%</div>
         </div>
         <div class="score-card card-hold">
             <div class="score-label">홀딩 적합도</div>
@@ -796,7 +982,7 @@ def main():
     st.markdown(f'<div class="verdict-banner {cls_map[v]}">{scores["verdict_text"]}</div>', unsafe_allow_html=True)
 
     # ── 탭 ────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 차트", "🔢 신호 상세", "🛡️ 손절 관리", "🔍 전종목 스캐너"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 차트", "🔢 신호 상세", "🛡️ 손절 관리", "🔍 전종목 스캐너", "🚨 매수 알람"])
 
     with tab1:
         fig = make_chart(df, ticker, avg_price if has_pos else None, atr)
@@ -885,40 +1071,81 @@ def main():
 
 
     with tab4:
-        st.markdown('<div class="sec-hdr">전종목 매수 적합도 스캐너</div>', unsafe_allow_html=True)
+        n_us = len(SCAN_US)
+        n_kr = len(SCAN_KR)
         st.markdown(
-            "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
-            "G_US_F1 신호 기반 — 매수 적합도 순위표. 매 10분 캐시 갱신.</div>",
+            f"<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
+            f"G_US_F1 신호 기반 전종목 스캔 — "
+            f"🇺🇸 미국 <b style='color:#e2e8f0'>{n_us}종목</b> / "
+            f"🇰🇷 국내 <b style='color:#e2e8f0'>{n_kr}종목</b> · 매 10분 캐시 갱신</div>",
             unsafe_allow_html=True
         )
+
+        # 필터 옵션
+        sf1, sf2, sf3 = st.columns(3)
+        with sf1:
+            threshold = st.slider("매수 적합도 하한", 0, 80, 50, 5,
+                                   help="이 값 이상인 종목만 표시")
+        with sf2:
+            show_all = st.toggle("전체 종목 보기", value=False,
+                                  help="OFF: 매수 우위만 / ON: 전체")
+        with sf3:
+            sort_by = st.selectbox("정렬 기준", ["매수% 높은순", "매도% 높은순", "RSI 낮은순"])
 
         sc_col1, sc_col2 = st.columns(2)
 
         for col_, market_, label_ in [(sc_col1,'US','🇺🇸 미국주식'), (sc_col2,'KR','🇰🇷 국내주식')]:
             with col_:
-                st.markdown(f"**{label_}**")
-                with st.spinner(f"{label_} 스캔 중... (30~60초 소요)"):
+                n_total = len(SCAN_US) if market_ == 'US' else len(SCAN_KR)
+                st.markdown(f"**{label_}** ({n_total}종목)")
+                with st.spinner(f"{label_} 스캔 중... ({n_total}종목, 약 1~2분 소요)"):
                     df_scan = scan_market(market_)
 
                 if df_scan.empty:
                     st.warning("데이터를 가져오지 못했습니다.")
                     continue
 
-                # 90% 이상 하이라이트
+                # 정렬
+                if sort_by == "매도% 높은순":
+                    df_scan = df_scan.sort_values('sell_pct', ascending=False)
+                elif sort_by == "RSI 낮은순":
+                    df_scan = df_scan.sort_values('rsi', ascending=True)
+
+                # 필터
+                if not show_all:
+                    df_view = df_scan[df_scan['buy_pct'] >= threshold]
+                else:
+                    df_view = df_scan
+
+                # 매수 우위 하이라이트
                 top_picks = df_scan[df_scan['buy_pct'] >= 60]
+                n_pass = len(top_picks)
+                n_total_scanned = len(df_scan)
+
+                st.markdown(
+                    f"<div style='display:flex;gap:12px;margin-bottom:0.8rem'>",
+                    unsafe_allow_html=True
+                )
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.metric("스캔 완료", f"{n_total_scanned}종목")
+                with col_b:
+                    st.metric("매수 우위 (60%↑)", f"{n_pass}종목")
+                with col_c:
+                    st.metric("표시 중", f"{len(df_view)}종목")
 
                 if not top_picks.empty:
+                    names = ', '.join(top_picks['name'].tolist())
                     st.markdown(
                         f"<div style='background:#0f2d1a;border:1px solid #166534;"
                         f"border-radius:8px;padding:0.7rem 1rem;margin-bottom:0.8rem;"
                         f"font-size:0.82rem;color:#86efac'>"
-                        f"🎯 매수 적합도 60% 이상: "
-                        f"<b>{', '.join(top_picks['name'].tolist())}</b></div>",
+                        f"🎯 매수 우위 종목: <b>{names}</b></div>",
                         unsafe_allow_html=True
                     )
 
                 # 순위표 렌더링
-                for _, r in df_scan.iterrows():
+                for _, r in df_view.iterrows():
                     buy = r['buy_pct']
                     if buy >= 60:
                         bar_color = '#22c55e'
@@ -941,6 +1168,10 @@ def main():
                             <div>
                                 <span style="font-weight:600;color:#e2e8f0;font-size:0.9rem">{r['name']}</span>
                                 <span style="color:#475569;font-size:0.75rem;margin-left:6px">{r['ticker']}</span>
+                                <span style="font-size:0.7rem;padding:1px 6px;border-radius:10px;
+                                    background:#1e2a3a;color:#64748b;margin-left:4px">
+                                    유니버스 {r['rank']}위/{r['total']}
+                                </span>
                             </div>
                             <div style="font-family:Space Mono,monospace;font-size:0.82rem;color:#94a3b8">
                                 ${r['close']:,.2f} &nbsp;|&nbsp; RSI {r['rsi']}
@@ -956,6 +1187,166 @@ def main():
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+
+
+
+    # ── 탭5: 매수 알람 ─────────────────────────────────────
+    with tab5:
+        st.markdown('<div class="sec-hdr">매수 알람 — 매수 점수 90% 이상 종목</div>', unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
+            "G_US_F1 유니버스 백분위 기준 — <b style='color:#22c55e'>상위 20% (매수 후보)</b> 이상 종목 표시 · "
+            "종목 클릭 시 차트 표시 · 매 10분 캐시 갱신</div>",
+            unsafe_allow_html=True
+        )
+
+        # 스캔 실행
+        alarm_col1, alarm_col2 = st.columns(2)
+
+        alarm_results = {}
+        for market_, label_ in [('US','🇺🇸 미국주식'), ('KR','🇰🇷 국내주식')]:
+            with st.spinner(f"{label_} 스캔 중..."):
+                df_s = scan_market(market_)
+            if not df_s.empty:
+                alarm_results[market_] = df_s
+
+        # 임계값 선택
+        alarm_thresh = st.slider(
+            "매수 점수 기준", 50, 95, 70, 5,
+            help="이 값 이상인 종목만 알람 목록에 표시합니다",
+            key="alarm_thresh"
+        )
+
+        for market_, label_ in [('US','🇺🇸 미국주식'), ('KR','🇰🇷 국내주식')]:
+            st.markdown(f"### {label_}")
+
+            if market_ not in alarm_results or alarm_results[market_].empty:
+                st.warning("데이터 없음")
+                continue
+
+            df_alarm = alarm_results[market_][
+                alarm_results[market_]['buy_pct'] >= alarm_thresh
+            ].copy().reset_index(drop=True)
+
+            if df_alarm.empty:
+                st.info(f"현재 매수 점수 {alarm_thresh}% 이상 종목이 없습니다.")
+                continue
+
+            # 통계 요약
+            st.markdown(
+                f"<div style='background:#0f2d1a;border:1px solid #166534;"
+                f"border-radius:8px;padding:0.6rem 1rem;margin-bottom:0.8rem;"
+                f"font-size:0.85rem;color:#86efac'>"
+                f"🎯 {len(df_alarm)}개 종목 감지 (전체 "
+                f"{'미국 155' if market_=='US' else '국내 62'}종목 중)</div>",
+                unsafe_allow_html=True
+            )
+
+            # 테이블 헤더
+            st.markdown("""
+            <div style="display:grid;grid-template-columns:80px 120px 130px 90px 90px 90px;
+                gap:4px;padding:6px 8px;background:#0f1623;border-radius:6px;
+                font-size:0.72rem;letter-spacing:0.08em;text-transform:uppercase;
+                color:#475569;font-weight:600;margin-bottom:4px">
+                <div>티커</div><div>종목명</div>
+                <div>현재가 (날짜)</div>
+                <div style="text-align:center">매수</div>
+                <div style="text-align:center">홀딩</div>
+                <div style="text-align:center">매도</div>
+            </div>""", unsafe_allow_html=True)
+
+            # 종목 행 렌더링
+            selected_ticker = None
+            selected_name   = None
+
+            for idx_, r in df_alarm.iterrows():
+                buy_  = r['buy_pct']
+                hold_ = r['hold_pct']
+                sell_ = r['sell_pct']
+
+                # 매수 점수별 강도 색상
+                if buy_ >= 80:
+                    buy_color = '#22c55e'
+                    row_bg    = '#0a1a0f'
+                    row_bdr   = '#166534'
+                elif buy_ >= 70:
+                    buy_color = '#86efac'
+                    row_bg    = '#0a150f'
+                    row_bdr   = '#14532d'
+                else:
+                    buy_color = '#bbf7d0'
+                    row_bg    = '#0f1623'
+                    row_bdr   = '#1e2a3a'
+
+                # 날짜 (오늘 기준)
+                from datetime import date
+                today_str = date.today().strftime('%m/%d')
+
+                row_html = f"""
+                <div style="display:grid;grid-template-columns:80px 120px 130px 90px 90px 90px;
+                    gap:4px;padding:8px 8px;background:{row_bg};
+                    border:1px solid {row_bdr};border-radius:6px;
+                    margin-bottom:3px;align-items:center">
+                    <div style="font-family:Space Mono,monospace;font-size:0.8rem;
+                        color:#94a3b8">{r['ticker']}</div>
+                    <div style="font-size:0.88rem;font-weight:600;
+                        color:#e2e8f0">{r['name']}</div>
+                    <div style="font-family:Space Mono,monospace;font-size:0.82rem;color:#64748b">
+                        ${r['close']:,.2f}
+                        <span style="font-size:0.7rem;color:#334155"> {today_str}</span>
+                    </div>
+                    <div style="text-align:center;font-family:Space Mono,monospace;
+                        font-weight:700;font-size:0.9rem;color:{buy_color}">{buy_}%</div>
+                    <div style="text-align:center;font-family:Space Mono,monospace;
+                        font-size:0.85rem;color:#eab308">{hold_}%</div>
+                    <div style="text-align:center;font-family:Space Mono,monospace;
+                        font-size:0.85rem;color:#ef4444">{sell_}%</div>
+                </div>"""
+                st.markdown(row_html, unsafe_allow_html=True)
+
+                # 클릭 버튼 (차트 토글)
+                btn_key = f"alarm_btn_{market_}_{r['ticker']}"
+                if st.button(f"📈 {r['name']} 차트 보기", key=btn_key,
+                              use_container_width=False):
+                    st.session_state[f'alarm_chart_{market_}'] = r['ticker']
+                    st.session_state[f'alarm_chart_{market_}_name'] = r['name']
+
+            # 선택된 종목 차트 표시
+            chart_key = f'alarm_chart_{market_}'
+            if chart_key in st.session_state:
+                sel_ticker = st.session_state[chart_key]
+                sel_name   = st.session_state.get(f'{chart_key}_name', sel_ticker)
+                st.markdown(f"---")
+                st.markdown(f"**📈 {sel_name} ({sel_ticker}) 차트**")
+                with st.spinner(f"{sel_ticker} 차트 로딩 중..."):
+                    try:
+                        df_chart = fetch(sel_ticker)
+                        if len(df_chart) >= 130:
+                            fig_alarm = make_chart(df_chart, sel_ticker)
+                            st.plotly_chart(fig_alarm, use_container_width=True)
+
+                            # 간단 신호 요약
+                            d_alarm  = compute(df_chart)
+                            row_alarm = d_alarm.iloc[-1]
+                            g_raw_a, _ = g_score(row_alarm)
+                            f1_ok_a, _ = check_f1()
+                            sc_a = calc_scores(g_raw_a, f1_ok_a, None,
+                                               float(row_alarm['Close']),
+                                               float(row_alarm['atr']) if not pd.isna(row_alarm['atr']) else 0)
+                            v = sc_a['verdict']
+                            cls_map2 = {'buy':'verdict-buy','hold':'verdict-hold',
+                                        'sell':'verdict-sell','filter':'verdict-filter'}
+                            st.markdown(
+                                f'<div class="verdict-banner {cls_map2[v]}">'
+                                f'{sc_a["verdict_text"]}</div>',
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            st.warning("데이터 부족")
+                    except Exception as e:
+                        st.error(f"차트 로딩 실패: {e}")
+
+            st.markdown("<br>", unsafe_allow_html=True)
 
 
     # 면책 고지
