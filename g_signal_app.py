@@ -933,9 +933,105 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
 
         st.info("👈 사이드바에서 종목명 또는 티커를 입력하고 **분석 실행**을 눌러주세요.")
 
-        # quick_ticker 처리 (홈 화면에서 종목 클릭 시)
         if 'quick_ticker' in st.session_state:
             st.info(f"💡 사이드바에서 **{st.session_state.get('quick_name', '')}** 을 검색하고 분석 실행을 눌러주세요.")
+
+        # ── 보유종목 리스트 (첫화면 하단) ─────────────────────
+        if 'portfolio' in st.session_state and st.session_state.portfolio:
+            st.divider()
+            st.markdown('<div class="sec-hdr">💼 보유종목 현황</div>', unsafe_allow_html=True)
+
+            col_ref, _ = st.columns([1, 5])
+            with col_ref:
+                if st.button("🔄 현재가 + 점수 갱신", key="home_refresh"):
+                    for pos in st.session_state.portfolio:
+                        try:
+                            df_p = fetch(pos['ticker'], days=300)
+                            if len(df_p) >= 130:
+                                pos['curr_price'] = float(df_p['Close'].iloc[-1])
+                                pos['curr_date']  = df_p.index[-1].strftime('%m/%d')
+                                d_p  = compute(df_p)
+                                row_p = d_p.iloc[-1]
+                                g_raw_p, _ = g_score(row_p)
+                                f1_ok_p, _ = check_f1()
+                                sc_p = calc_scores(g_raw_p, f1_ok_p, pos['avg_price'],
+                                                   pos['curr_price'],
+                                                   float(row_p['atr']) if not pd.isna(row_p['atr']) else 0)
+                                pos['buy_pct']  = sc_p['buy']
+                                pos['hold_pct'] = sc_p['hold']
+                                pos['sell_pct'] = sc_p['sell']
+                        except:
+                            pass
+                    st.rerun()
+
+            st.markdown("""
+            <div style="display:grid;
+                grid-template-columns:110px 80px 80px 70px 80px 80px 60px 60px 60px;
+                gap:4px;padding:6px 10px;background:#0f1623;border-radius:6px;
+                font-size:0.67rem;letter-spacing:0.08em;text-transform:uppercase;
+                color:#475569;font-weight:600;margin-bottom:4px">
+                <div>종목명</div>
+                <div style="text-align:right">매수가</div>
+                <div style="text-align:right">현재가</div>
+                <div style="text-align:right">수익률</div>
+                <div style="text-align:right">목표가</div>
+                <div style="text-align:right">손절가</div>
+                <div style="text-align:center">매수%</div>
+                <div style="text-align:center">홀딩%</div>
+                <div style="text-align:center">매도%</div>
+            </div>""", unsafe_allow_html=True)
+
+            for pos in st.session_state.portfolio:
+                pnl_pct  = (pos['curr_price'] / pos['avg_price'] - 1) * 100
+                sl_price = pos['avg_price'] * 0.92
+                tp_price = pos['avg_price'] * 1.15
+                is_sl    = pos['curr_price'] <= sl_price
+
+                buy_s  = pos.get('buy_pct',  None)
+                hold_s = pos.get('hold_pct', None)
+                sell_s = pos.get('sell_pct', None)
+
+                row_bg = '#1a0a0a' if is_sl else ('#0f2d1a' if pnl_pct >= 15 else ('#0a150f' if pnl_pct >= 0 else '#150a0a'))
+                row_bd = '#ef4444' if is_sl else ('#166534' if pnl_pct >= 15 else '#1e2a3a')
+                pnl_color = '#22c55e' if pnl_pct >= 0 else '#ef4444'
+                buy_color  = '#22c55e' if buy_s and buy_s >= 50 else '#94a3b8'
+                sell_color = '#ef4444' if sell_s and sell_s >= 50 else '#94a3b8'
+
+                buy_disp  = f"{buy_s}%"  if buy_s  is not None else '—'
+                hold_disp = f"{hold_s}%" if hold_s is not None else '—'
+                sell_disp = f"{sell_s}%" if sell_s is not None else '—'
+
+                sl_warn = ' ⚠️' if is_sl else ''
+                curr_str = f"${pos['curr_price']:,.2f}"
+                avg_str  = f"${pos['avg_price']:,.2f}"
+
+                st.markdown(f"""
+                <div style="display:grid;
+                    grid-template-columns:110px 80px 80px 70px 80px 80px 60px 60px 60px;
+                    gap:4px;padding:8px 10px;background:{row_bg};
+                    border:1px solid {row_bd};border-radius:6px;margin-bottom:3px;
+                    align-items:center;font-family:Space Mono,monospace;font-size:0.79rem">
+                    <div style="font-family:Space Grotesk,sans-serif;font-weight:600;color:#e2e8f0">
+                        {pos['name']}<span style="color:#ef4444">{sl_warn}</span></div>
+                    <div style="text-align:right;color:#64748b">{avg_str}</div>
+                    <div style="text-align:right;color:#e2e8f0;font-weight:600">{curr_str}</div>
+                    <div style="text-align:right;color:{pnl_color};font-weight:700">{pnl_pct:+.1f}%</div>
+                    <div style="text-align:right;color:#22c55e">${tp_price:,.2f}</div>
+                    <div style="text-align:right;color:#ef4444">${sl_price:,.2f}</div>
+                    <div style="text-align:center;color:{buy_color};font-weight:700">{buy_disp}</div>
+                    <div style="text-align:center;color:#eab308">{hold_disp}</div>
+                    <div style="text-align:center;color:{sell_color}">{sell_disp}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if is_sl:
+                    st.markdown('<div class="verdict-banner verdict-sell">⚠️ 손절선 이탈 — 즉시 매도 또는 포지션 재검토</div>', unsafe_allow_html=True)
+
+            st.markdown(
+                "<div style='font-size:0.72rem;color:#334155;margin-top:4px'>"
+                "💡 점수 표시는 갱신 버튼 클릭 시 업데이트됩니다.</div>",
+                unsafe_allow_html=True
+            )
 
         return
 
