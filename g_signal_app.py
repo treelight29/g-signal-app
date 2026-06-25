@@ -1,5 +1,5 @@
 """
-G-SIGNAL v0.1 — 스윙 매수 적합도 앱
+Luna-Signal v0.1 — 스윙 매수 적합도 앱
 =====================================
 신호 엔진: G_US_F1 (가격구조 + 거래량 + 금리충격 필터)
 검증 기반: Phase 1~3B 통과 (MDD -23.5%, 2022 방어 확인)
@@ -25,8 +25,8 @@ warnings.filterwarnings('ignore')
 # 페이지 설정
 # ══════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="G-SIGNAL",
-    page_icon="📡",
+    page_title="Luna-Signal",
+    page_icon="🌙",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -708,8 +708,8 @@ def make_chart(df: pd.DataFrame, ticker: str,
 # ══════════════════════════════════════════════════════════
 def sidebar():
     with st.sidebar:
-        st.markdown("## 📡 G-SIGNAL")
-        st.markdown("<div style='font-size:0.78rem;color:#475569;margin-bottom:1rem'>스윙 매수 적합도 분석 v0.1</div>", unsafe_allow_html=True)
+        st.markdown("## 📡 Luna-Signal")
+        st.markdown("<div style='font-size:0.78rem;color:#475569;margin-bottom:1rem'>스윙 매수 적합도 분석 v1.0</div>", unsafe_allow_html=True)
         st.divider()
 
         query = st.text_input(
@@ -776,15 +776,114 @@ def ind_row(name, val_str, badge_text, badge_kind):
 def main():
     ticker, resolved_name, has_pos, avg_price, run = sidebar()
 
-    st.markdown("# 📡 G-SIGNAL")
+    st.markdown("# 📡 Luna-Signal")
     st.markdown("<div style='color:#475569;font-size:0.9rem;margin-bottom:1.5rem'>20거래일 스윙 매수 적합도 분석 — G_US_F1 신호 엔진 v0.1</div>", unsafe_allow_html=True)
 
     if not run:
+        # ── 기본화면: 전종목 스크리닝 상위 10개 ─────────────────
         st.markdown("""
-<div style="background:#0f1623;border:1px solid #1e2a3a;border-radius:12px;padding:1.8rem 2rem;margin-bottom:1.5rem">
+<div style="font-size:0.68rem;letter-spacing:0.14em;text-transform:uppercase;
+color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
+📡 실시간 매수 적합도 — 상위 10종목
+</div>""", unsafe_allow_html=True)
 
-<div style="font-size:0.68rem;letter-spacing:0.14em;text-transform:uppercase;color:#3b82f6;font-weight:600;margin-bottom:1rem">전략 개요</div>
+        f1_ok_home, tnx_ch_home = check_f1()
+        if not np.isnan(tnx_ch_home):
+            if f1_ok_home:
+                st.markdown(
+                    f"<div class='f1-box f1-ok'>✅ 금리충격 필터 OFF — 매수 신호 활성 "
+                    f"(10Y금리 60일 변화: {tnx_ch_home:+.2f}%p)</div>",
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f"<div class='f1-box f1-warn'>⚠️ 금리충격 필터 ON — 신규 매수 비활성 "
+                    f"(10Y금리 60일 변화: {tnx_ch_home:+.2f}%p ＞ +0.75%p)</div>",
+                    unsafe_allow_html=True)
 
+        home_tab_us, home_tab_kr = st.tabs(["🇺🇸 미국주식 Top10", "🇰🇷 국내주식 Top10"])
+
+        for home_tab, home_market, home_label in [
+            (home_tab_us, 'US', '미국'),
+            (home_tab_kr, 'KR', '국내'),
+        ]:
+            with home_tab:
+                with st.spinner(f"{home_label} 종목 스캔 중..."):
+                    df_home = scan_market(home_market)
+
+                if df_home.empty:
+                    st.warning("데이터를 가져오지 못했습니다.")
+                    continue
+
+                top10 = df_home.head(10)
+
+                # 테이블 헤더
+                st.markdown("""
+                <div style="display:grid;grid-template-columns:40px 80px 110px 100px 70px 70px 70px;
+                    gap:4px;padding:6px 8px;background:#0f1623;border-radius:6px;
+                    font-size:0.7rem;letter-spacing:0.08em;text-transform:uppercase;
+                    color:#475569;font-weight:600;margin-bottom:4px">
+                    <div>순위</div><div>티커</div><div>종목명</div>
+                    <div>현재가</div>
+                    <div style="text-align:center">매수</div>
+                    <div style="text-align:center">홀딩</div>
+                    <div style="text-align:center">매도</div>
+                </div>""", unsafe_allow_html=True)
+
+                for _, r in top10.iterrows():
+                    pct   = r['percentile']
+                    buy_  = r['buy_pct']
+                    hold_ = r['hold_pct']
+                    sell_ = r['sell_pct']
+                    rank_ = r['rank']
+
+                    if pct >= 80:
+                        bar_c = '#22c55e'; row_bg = '#0a1a0f'; row_bd = '#166534'
+                        rank_c = '#22c55e'
+                    elif pct >= 60:
+                        bar_c = '#eab308'; row_bg = '#1a1500'; row_bd = '#92400e'
+                        rank_c = '#eab308'
+                    else:
+                        bar_c = '#94a3b8'; row_bg = '#0f1623'; row_bd = '#1e2a3a'
+                        rank_c = '#64748b'
+
+                    price_str = f"${r['close']:,.2f}" if home_market == 'US' else f"₩{r['close']:,.0f}"
+
+                    st.markdown(f"""
+                    <div style="display:grid;grid-template-columns:40px 80px 110px 100px 70px 70px 70px;
+                        gap:4px;padding:8px 8px;background:{row_bg};
+                        border:1px solid {row_bd};border-radius:6px;margin-bottom:3px;align-items:center">
+                        <div style="font-family:Space Mono,monospace;font-size:0.9rem;
+                            font-weight:700;color:{rank_c}">#{rank_}</div>
+                        <div style="font-family:Space Mono,monospace;font-size:0.75rem;
+                            color:#94a3b8">{r['ticker']}</div>
+                        <div style="font-size:0.85rem;font-weight:600;color:#e2e8f0">{r['name']}</div>
+                        <div style="font-family:Space Mono,monospace;font-size:0.82rem;
+                            color:#64748b">{price_str}</div>
+                        <div style="text-align:center;font-family:Space Mono,monospace;
+                            font-weight:700;font-size:0.88rem;color:{bar_c}">{buy_}%</div>
+                        <div style="text-align:center;font-family:Space Mono,monospace;
+                            font-size:0.82rem;color:#eab308">{hold_}%</div>
+                        <div style="text-align:center;font-family:Space Mono,monospace;
+                            font-size:0.82rem;color:#ef4444">{sell_}%</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # 종목 클릭 → 분석 실행 버튼
+                    if st.button(f"🔍 {r['name']} 분석", key=f"home_{home_market}_{r['ticker']}",
+                                  use_container_width=False):
+                        st.session_state['quick_ticker'] = r['ticker']
+                        st.session_state['quick_name']   = r['name']
+                        st.rerun()
+
+                st.markdown(
+                    f"<div style='font-size:0.72rem;color:#334155;margin-top:0.5rem'>"
+                    f"전체 {len(df_home)}종목 중 상위 10개 표시 · 10분 캐시</div>",
+                    unsafe_allow_html=True)
+
+        # 전략 개요 (접힌 형태)
+        with st.expander("📋 전략 개요 보기"):
+            st.markdown("""
+<div style="background:#0f1623;border:1px solid #1e2a3a;border-radius:12px;padding:1.8rem 2rem;">
 <div style="display:flex;gap:2rem;flex-wrap:wrap">
 
 <div style="flex:1;min-width:220px">
@@ -794,7 +893,7 @@ def main():
 <b style="color:#e2e8f0">Phase 1.5</b> — G 전략 실패 원인 진단<br>
 <b style="color:#e2e8f0">Phase 2A</b> — SMA200 필터 테스트 → 실패<br>
 <b style="color:#e2e8f0">Phase 2B</b> — 금리충격 필터(F1) 테스트 → 통과<br>
-<b style="color:#e2e8f0">Phase 3B</b> — 포트폴리오 백테스트 → v1b 확정
+<b style="color:#e2e8f0">Phase G2-3</b> — 트레일링+점수연장 → v1.0 확정
 </div>
 </div>
 
@@ -804,7 +903,7 @@ def main():
 <b style="color:#e2e8f0">신호</b> — 가격구조 + 거래량 (후행지표 최소화)<br>
 <b style="color:#e2e8f0">필터</b> — 10년물 금리 60일 변화 ＞ +0.75%p 시 매수 중단<br>
 <b style="color:#e2e8f0">손절</b> — 진입가 대비 -8% 고정<br>
-<b style="color:#e2e8f0">보유</b> — 20거래일 스윙 기준<br>
+<b style="color:#e2e8f0">보유</b> — 점수 유지 시 최대 30거래일<br>
 <b style="color:#e2e8f0">종목</b> — 미국 대형주 중심
 </div>
 </div>
@@ -812,11 +911,11 @@ def main():
 <div style="flex:1;min-width:220px">
 <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.5rem">📊 백테스트 성과 (2010~2025)</div>
 <div style="font-size:0.88rem;color:#cbd5e1;line-height:1.9">
-<span style="color:#22c55e;font-family:Space Mono,monospace;font-weight:700">CAGR +11.5%</span> <span style="color:#475569;font-size:0.78rem">vs SPY +14.4%</span><br>
-<span style="color:#22c55e;font-family:Space Mono,monospace;font-weight:700">MDD -23.5%</span> <span style="color:#475569;font-size:0.78rem">vs SPY -33.7%</span><br>
-<span style="color:#22c55e;font-family:Space Mono,monospace;font-weight:700">Sharpe 0.75</span> <span style="color:#475569;font-size:0.78rem">vs SPY 0.84</span><br>
-<span style="color:#eab308;font-family:Space Mono,monospace;font-weight:700">2022년 -9.9%</span> <span style="color:#475569;font-size:0.78rem">SPY 해당연도 -18%</span><br>
-<span style="color:#94a3b8;font-size:0.78rem">승률 55.3% / 평균보유 10.4일</span>
+<span style="color:#22c55e;font-family:Space Mono,monospace;font-weight:700">CAGR +9.3%</span> <span style="color:#475569;font-size:0.78rem">vs SPY +14.4%</span><br>
+<span style="color:#22c55e;font-family:Space Mono,monospace;font-weight:700">MDD -26.0%</span> <span style="color:#475569;font-size:0.78rem">vs SPY -33.7%</span><br>
+<span style="color:#22c55e;font-family:Space Mono,monospace;font-weight:700">Sharpe 0.70</span> <span style="color:#475569;font-size:0.78rem">vs SPY 0.84</span><br>
+<span style="color:#eab308;font-family:Space Mono,monospace;font-weight:700">2022년 -23.2%</span> <span style="color:#475569;font-size:0.78rem">SPY 해당연도 -18%</span><br>
+<span style="color:#94a3b8;font-size:0.78rem">승률 58.9% / 평균보유 21.8일</span>
 </div>
 </div>
 
@@ -828,9 +927,16 @@ def main():
 </div>
 
 </div>
+</div>
+</div>
 """, unsafe_allow_html=True)
 
         st.info("👈 사이드바에서 종목명 또는 티커를 입력하고 **분석 실행**을 눌러주세요.")
+
+        # quick_ticker 처리 (홈 화면에서 종목 클릭 시)
+        if 'quick_ticker' in st.session_state:
+            st.info(f"💡 사이드바에서 **{st.session_state.get('quick_name', '')}** 을 검색하고 분석 실행을 눌러주세요.")
+
         return
 
     # 데이터 로딩
@@ -982,7 +1088,7 @@ def main():
     st.markdown(f'<div class="verdict-banner {cls_map[v]}">{scores["verdict_text"]}</div>', unsafe_allow_html=True)
 
     # ── 탭 ────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 차트", "🔢 신호 상세", "🛡️ 손절 관리", "🔍 전종목 스캐너", "🚨 매수 알람"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 차트", "🔢 신호 상세", "🛡️ 손절 관리", "🔍 전종목 스캐너", "🚨 매수 알람", "💼 보유종목 관리"])
 
     with tab1:
         fig = make_chart(df, ticker, avg_price if has_pos else None, atr)
@@ -1349,11 +1455,199 @@ def main():
             st.markdown("<br>", unsafe_allow_html=True)
 
 
+
+    # ── 탭6: 보유종목 관리 ────────────────────────────────
+    with tab6:
+        st.markdown('<div class="sec-hdr">💼 보유종목 손절 관리</div>', unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
+            "보유 종목을 등록하면 손절선(-8%)과 현재 손익을 실시간으로 모니터링합니다.</div>",
+            unsafe_allow_html=True
+        )
+
+        # 세션 상태 초기화
+        if 'portfolio' not in st.session_state:
+            st.session_state.portfolio = []
+
+        # ── 종목 추가 폼 ──────────────────────────────────
+        st.markdown('<div class="sec-hdr">종목 추가</div>', unsafe_allow_html=True)
+        p1, p2, p3, p4 = st.columns([2, 1.5, 1.5, 1])
+        with p1:
+            new_ticker = st.text_input("티커 또는 종목명", key="port_ticker",
+                                        placeholder="AAPL, 삼성전자 등").strip()
+        with p2:
+            new_price  = st.number_input("평균 매수가", min_value=0.01,
+                                          value=100.0, step=0.01, key="port_price")
+        with p3:
+            new_shares = st.number_input("수량 (주)", min_value=1,
+                                          value=10, step=1, key="port_shares")
+        with p4:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            add_btn = st.button("➕ 추가", use_container_width=True)
+
+        if add_btn and new_ticker:
+            # 티커 변환
+            resolved_t, resolved_n = resolve_ticker(new_ticker)
+            if resolved_t != 'UNKNOWN':
+                # 현재가 조회
+                try:
+                    df_p = fetch(resolved_t, days=10)
+                    curr_p = float(df_p['Close'].iloc[-1]) if len(df_p) > 0 else new_price
+                    curr_date = df_p.index[-1].strftime('%Y-%m-%d') if len(df_p) > 0 else '-'
+                except:
+                    curr_p = new_price
+                    curr_date = '-'
+
+                st.session_state.portfolio.append({
+                    'ticker':     resolved_t,
+                    'name':       resolved_n,
+                    'avg_price':  new_price,
+                    'shares':     new_shares,
+                    'curr_price': curr_p,
+                    'curr_date':  curr_date,
+                    'sl_price':   round(new_price * 0.92, 2),
+                    'tp1_price':  round(new_price * 1.15, 2),
+                    'tp2_price':  round(new_price * 1.25, 2),
+                })
+                st.success(f"✅ {resolved_n} ({resolved_t}) 추가됨")
+                st.rerun()
+            else:
+                st.error("종목을 찾지 못했습니다. 티커를 직접 입력해주세요.")
+
+        # ── 보유종목 테이블 ───────────────────────────────
+        if not st.session_state.portfolio:
+            st.info("보유 종목이 없습니다. 위에서 종목을 추가해주세요.")
+        else:
+            # 현재가 새로고침 버튼
+            col_r1, col_r2 = st.columns([1, 5])
+            with col_r1:
+                if st.button("🔄 현재가 갱신", use_container_width=True):
+                    for pos in st.session_state.portfolio:
+                        try:
+                            df_p = fetch(pos['ticker'], days=10)
+                            if len(df_p) > 0:
+                                pos['curr_price'] = float(df_p['Close'].iloc[-1])
+                                pos['curr_date']  = df_p.index[-1].strftime('%Y-%m-%d')
+                        except:
+                            pass
+                    st.rerun()
+
+            st.divider()
+
+            # 포트폴리오 요약
+            total_cost    = sum(p['avg_price'] * p['shares'] for p in st.session_state.portfolio)
+            total_curr    = sum(p['curr_price'] * p['shares'] for p in st.session_state.portfolio)
+            total_pnl     = total_curr - total_cost
+            total_pnl_pct = (total_curr / total_cost - 1) * 100 if total_cost > 0 else 0
+            pnl_color     = '#22c55e' if total_pnl >= 0 else '#ef4444'
+
+            s1, s2, s3, s4 = st.columns(4)
+            with s1: st.metric("보유 종목 수", f"{len(st.session_state.portfolio)}개")
+            with s2: st.metric("총 매수금액", f"${total_cost:,.0f}")
+            with s3: st.metric("총 평가금액", f"${total_curr:,.0f}")
+            with s4: st.metric("총 손익", f"{total_pnl_pct:+.2f}%",
+                                delta=f"${total_pnl:+,.0f}")
+
+            st.divider()
+
+            # 종목별 카드
+            for idx_p, pos in enumerate(st.session_state.portfolio):
+                pnl_pct   = (pos['curr_price'] / pos['avg_price'] - 1) * 100
+                pnl_amt   = (pos['curr_price'] - pos['avg_price']) * pos['shares']
+                is_sl     = pos['curr_price'] <= pos['sl_price']
+                is_tp1    = pos['curr_price'] >= pos['tp1_price']
+
+                if is_sl:
+                    card_bg  = '#1a0a0a'
+                    card_bdr = '#ef4444'
+                    status   = '⚠️ 손절선 이탈'
+                    st_color = '#ef4444'
+                elif is_tp1:
+                    card_bg  = '#0f2d1a'
+                    card_bdr = '#22c55e'
+                    status   = '🎯 1차 목표 달성'
+                    st_color = '#22c55e'
+                else:
+                    pnl_color_c = '#22c55e' if pnl_pct >= 0 else '#ef4444'
+                    card_bg  = '#0f1623'
+                    card_bdr = '#1e2a3a'
+                    status   = f"{'▲' if pnl_pct>=0 else '▼'} {pnl_pct:+.2f}%"
+                    st_color = '#22c55e' if pnl_pct >= 0 else '#ef4444'
+
+                # 손절까지 거리
+                sl_gap = (pos['curr_price'] / pos['sl_price'] - 1) * 100
+
+                st.markdown(f"""
+                <div style="background:{card_bg};border:1px solid {card_bdr};
+                    border-radius:10px;padding:1rem 1.2rem;margin-bottom:8px">
+                    <div style="display:flex;justify-content:space-between;
+                        align-items:center;margin-bottom:10px">
+                        <div>
+                            <span style="font-weight:700;color:#e2e8f0;font-size:1rem">{pos['name']}</span>
+                            <span style="color:#475569;font-size:0.78rem;margin-left:8px">{pos['ticker']}</span>
+                            <span style="color:#334155;font-size:0.72rem;margin-left:8px">{pos['shares']}주</span>
+                        </div>
+                        <span style="color:{st_color};font-weight:700;font-size:0.92rem">{status}</span>
+                    </div>
+                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;
+                        font-family:Space Mono,monospace;font-size:0.82rem">
+                        <div>
+                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평균 매수가</div>
+                            <div style="color:#94a3b8">${pos['avg_price']:.2f}</div>
+                        </div>
+                        <div>
+                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">현재가 ({pos['curr_date']})</div>
+                            <div style="color:#e2e8f0;font-weight:600">${pos['curr_price']:.2f}</div>
+                        </div>
+                        <div>
+                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">손절선 (-8%)</div>
+                            <div style="color:#ef4444">${pos['sl_price']:.2f}
+                                <span style="font-size:0.68rem;color:#64748b">({sl_gap:+.1f}%)</span>
+                            </div>
+                        </div>
+                        <div>
+                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">1차 목표 (+15%)</div>
+                            <div style="color:#22c55e">${pos['tp1_price']:.2f}</div>
+                        </div>
+                        <div>
+                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평가손익</div>
+                            <div style="color:{'#22c55e' if pnl_amt>=0 else '#ef4444'};font-weight:700">
+                                ${pnl_amt:+,.0f}</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # 손절 경고 배너
+                if is_sl:
+                    st.markdown(
+                        '<div class="verdict-banner verdict-sell">'
+                        '⚠️ 손절선 이탈 — 즉시 매도 또는 포지션 재검토 필요</div>',
+                        unsafe_allow_html=True
+                    )
+                elif is_tp1:
+                    st.markdown(
+                        '<div class="verdict-banner verdict-hold">'
+                        '💡 +15% 목표 달성 — 분할 익절 또는 트레일링 스탑 고려</div>',
+                        unsafe_allow_html=True
+                    )
+
+                # 삭제 버튼
+                if st.button(f"🗑️ {pos['name']} 삭제", key=f"del_{idx_p}"):
+                    st.session_state.portfolio.pop(idx_p)
+                    st.rerun()
+
+            # 전체 초기화
+            if st.button("🗑️ 전체 초기화", type="secondary"):
+                st.session_state.portfolio = []
+                st.rerun()
+
+
     # 면책 고지
     st.markdown("""
     <div class="disclaimer">
     ⚠️ <b>투자 유의사항:</b> 이 앱의 점수는 G_US_F1 백테스트(2010~2025) 기반 기술적 적합도 점수이며,
-    실제 수익률을 보장하지 않습니다. 과거 성과(CAGR +11.5%, MDD -23.5%)는 미래 성과를 보장하지 않으며,
+    실제 수익률을 보장하지 않습니다. 과거 성과(CAGR +9.3%, MDD -26.0%)는 미래 성과를 보장하지 않으며,
     개별 종목 결과는 포트폴리오 전체 백테스트 결과와 다를 수 있습니다.
     투자 결정의 최종 책임은 본인에게 있습니다.
     </div>
