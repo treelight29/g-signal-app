@@ -708,20 +708,23 @@ def make_chart(df: pd.DataFrame, ticker: str,
 # ══════════════════════════════════════════════════════════
 def sidebar():
     with st.sidebar:
-        st.markdown("## 📡 Luna-Signal")
+        st.markdown("## 🌙 Luna-Signal")
         st.markdown("<div style='font-size:0.78rem;color:#475569;margin-bottom:1rem'>스윙 매수 적합도 분석 v1.0</div>", unsafe_allow_html=True)
         st.divider()
 
+        # ★ 홈화면 돋보기 버튼 클릭 시 자동 입력
+        default_query = st.session_state.pop('quick_ticker_input', 'AAPL')
+
         query = st.text_input(
             "종목명 또는 티커",
-            value="AAPL",
+            value=default_query,
+            key="main_query",
             help="종목명: 삼성전자, 애플, NVIDIA / 티커: AAPL, 005930.KS"
         ).strip()
 
         # 종목명 → 티커 변환
         ticker, resolved_name = resolve_ticker(query)
 
-        # 변환 결과 표시
         if query and query.upper() != ticker and ticker != 'UNKNOWN':
             st.markdown(
                 f"<div style='font-size:0.78rem;color:#22c55e;margin-top:4px'>"
@@ -745,13 +748,18 @@ def sidebar():
         st.divider()
         run = st.button("분석 실행", use_container_width=True, type="primary")
 
+        # ★ 분석 실행 버튼 클릭 시 quick_ticker 세션 정리
+        if run:
+            st.session_state.pop('quick_ticker', None)
+            st.session_state.pop('quick_name', None)
+
         st.markdown("""
         <div style='font-size:0.72rem;color:#334155;margin-top:1.5rem;line-height:1.7'>
-        <b>신호 엔진 정보</b><br>
-        · G_US_F1 (Phase 1~3B 검증)<br>
-        · MDD -23.5% (SPY -33.7%)<br>
-        · 20거래일 스윙 기준<br>
-        · -8% 손절 내장<br>
+        <b>신호 엔진 정보 (v1.0)</b><br>
+        · G_US_F1 + G2-3 개선 적용<br>
+        · MDD -26.0% (SPY -33.7%)<br>
+        · 최대 30거래일 스윙<br>
+        · -8% 손절 + 트레일링<br>
         · 금리충격 필터 연동
         </div>
         """, unsafe_allow_html=True)
@@ -762,6 +770,202 @@ def sidebar():
 # ══════════════════════════════════════════════════════════
 # 메인
 # ══════════════════════════════════════════════════════════
+def _render_portfolio_tab():
+    """보유종목 관리 — 홈화면 및 탭6 공통 사용"""
+    st.markdown(
+        "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
+        "보유 종목을 등록하면 손절선(-8%)과 현재 손익을 실시간으로 모니터링합니다.</div>",
+        unsafe_allow_html=True
+    )
+    if 'portfolio' not in st.session_state:
+        st.session_state.portfolio = []
+
+    st.markdown('<div class="sec-hdr">💼 보유종목 손절 관리</div>', unsafe_allow_html=True)
+    st.markdown(
+        "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
+        "보유 종목을 등록하면 손절선(-8%)과 현재 손익을 실시간으로 모니터링합니다.</div>",
+        unsafe_allow_html=True
+    )
+
+    # 세션 상태 초기화
+    if 'portfolio' not in st.session_state:
+        st.session_state.portfolio = []
+
+    # ── 종목 추가 폼 (st.form 사용 → Tab키 문제 해결) ──
+    st.markdown('<div class="sec-hdr">종목 추가</div>', unsafe_allow_html=True)
+    with st.form("add_portfolio_form", clear_on_submit=True):
+        p1, p2, p3, p4 = st.columns([2, 1.5, 1.5, 1])
+        with p1:
+            new_ticker = st.text_input("티커 또는 종목명",
+                                        placeholder="AAPL, 삼성전자 등")
+        with p2:
+            new_price  = st.number_input("평균 매수가", min_value=0.01,
+                                          value=100.0, step=0.01)
+        with p3:
+            new_shares = st.number_input("수량 (주)", min_value=1,
+                                          value=10, step=1)
+        with p4:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            add_btn = st.form_submit_button("➕ 추가", use_container_width=True)
+
+    if add_btn and new_ticker.strip():
+        # 티커 변환
+        resolved_t, resolved_n = resolve_ticker(new_ticker.strip())
+        if resolved_t != 'UNKNOWN':
+            # 현재가 조회
+            try:
+                df_p = fetch(resolved_t, days=10)
+                curr_p = float(df_p['Close'].iloc[-1]) if len(df_p) > 0 else new_price
+                curr_date = df_p.index[-1].strftime('%Y-%m-%d') if len(df_p) > 0 else '-'
+            except:
+                curr_p = new_price
+                curr_date = '-'
+
+            st.session_state.portfolio.append({
+                'ticker':     resolved_t,
+                'name':       resolved_n,
+                'avg_price':  new_price,
+                'shares':     new_shares,
+                'curr_price': curr_p,
+                'curr_date':  curr_date,
+                'sl_price':   round(new_price * 0.92, 2),
+                'tp1_price':  round(new_price * 1.15, 2),
+                'tp2_price':  round(new_price * 1.25, 2),
+            })
+            st.success(f"✅ {resolved_n} ({resolved_t}) 추가됨")
+            st.rerun()
+        else:
+            st.error("종목을 찾지 못했습니다. 티커를 직접 입력해주세요.")
+
+    # ── 보유종목 테이블 ───────────────────────────────
+    if not st.session_state.portfolio:
+        st.info("보유 종목이 없습니다. 위에서 종목을 추가해주세요.")
+    else:
+        # 현재가 새로고침 버튼
+        col_r1, col_r2 = st.columns([1, 5])
+        with col_r1:
+            if st.button("🔄 현재가 갱신", use_container_width=True):
+                for pos in st.session_state.portfolio:
+                    try:
+                        df_p = fetch(pos['ticker'], days=10)
+                        if len(df_p) > 0:
+                            pos['curr_price'] = float(df_p['Close'].iloc[-1])
+                            pos['curr_date']  = df_p.index[-1].strftime('%Y-%m-%d')
+                    except:
+                        pass
+                st.rerun()
+
+        st.divider()
+
+        # 포트폴리오 요약
+        total_cost    = sum(p['avg_price'] * p['shares'] for p in st.session_state.portfolio)
+        total_curr    = sum(p['curr_price'] * p['shares'] for p in st.session_state.portfolio)
+        total_pnl     = total_curr - total_cost
+        total_pnl_pct = (total_curr / total_cost - 1) * 100 if total_cost > 0 else 0
+        pnl_color     = '#22c55e' if total_pnl >= 0 else '#ef4444'
+
+        s1, s2, s3, s4 = st.columns(4)
+        with s1: st.metric("보유 종목 수", f"{len(st.session_state.portfolio)}개")
+        with s2: st.metric("총 매수금액", f"${total_cost:,.0f}")
+        with s3: st.metric("총 평가금액", f"${total_curr:,.0f}")
+        with s4: st.metric("총 손익", f"{total_pnl_pct:+.2f}%",
+                            delta=f"${total_pnl:+,.0f}")
+
+        st.divider()
+
+        # 종목별 카드
+        for idx_p, pos in enumerate(st.session_state.portfolio):
+            pnl_pct   = (pos['curr_price'] / pos['avg_price'] - 1) * 100
+            pnl_amt   = (pos['curr_price'] - pos['avg_price']) * pos['shares']
+            is_sl     = pos['curr_price'] <= pos['sl_price']
+            is_tp1    = pos['curr_price'] >= pos['tp1_price']
+
+            if is_sl:
+                card_bg  = '#1a0a0a'
+                card_bdr = '#ef4444'
+                status   = '⚠️ 손절선 이탈'
+                st_color = '#ef4444'
+            elif is_tp1:
+                card_bg  = '#0f2d1a'
+                card_bdr = '#22c55e'
+                status   = '🎯 1차 목표 달성'
+                st_color = '#22c55e'
+            else:
+                pnl_color_c = '#22c55e' if pnl_pct >= 0 else '#ef4444'
+                card_bg  = '#0f1623'
+                card_bdr = '#1e2a3a'
+                status   = f"{'▲' if pnl_pct>=0 else '▼'} {pnl_pct:+.2f}%"
+                st_color = '#22c55e' if pnl_pct >= 0 else '#ef4444'
+
+            # 손절까지 거리
+            sl_gap = (pos['curr_price'] / pos['sl_price'] - 1) * 100
+
+            st.markdown(f"""
+            <div style="background:{card_bg};border:1px solid {card_bdr};
+                border-radius:10px;padding:1rem 1.2rem;margin-bottom:8px">
+                <div style="display:flex;justify-content:space-between;
+                    align-items:center;margin-bottom:10px">
+                    <div>
+                        <span style="font-weight:700;color:#e2e8f0;font-size:1rem">{pos['name']}</span>
+                        <span style="color:#475569;font-size:0.78rem;margin-left:8px">{pos['ticker']}</span>
+                        <span style="color:#334155;font-size:0.72rem;margin-left:8px">{pos['shares']}주</span>
+                    </div>
+                    <span style="color:{st_color};font-weight:700;font-size:0.92rem">{status}</span>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;
+                    font-family:Space Mono,monospace;font-size:0.82rem">
+                    <div>
+                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평균 매수가</div>
+                        <div style="color:#94a3b8">${pos['avg_price']:.2f}</div>
+                    </div>
+                    <div>
+                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">현재가 ({pos['curr_date']})</div>
+                        <div style="color:#e2e8f0;font-weight:600">${pos['curr_price']:.2f}</div>
+                    </div>
+                    <div>
+                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">손절선 (-8%)</div>
+                        <div style="color:#ef4444">${pos['sl_price']:.2f}
+                            <span style="font-size:0.68rem;color:#64748b">({sl_gap:+.1f}%)</span>
+                        </div>
+                    </div>
+                    <div>
+                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">1차 목표 (+15%)</div>
+                        <div style="color:#22c55e">${pos['tp1_price']:.2f}</div>
+                    </div>
+                    <div>
+                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평가손익</div>
+                        <div style="color:{'#22c55e' if pnl_amt>=0 else '#ef4444'};font-weight:700">
+                            ${pnl_amt:+,.0f}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 손절 경고 배너
+            if is_sl:
+                st.markdown(
+                    '<div class="verdict-banner verdict-sell">'
+                    '⚠️ 손절선 이탈 — 즉시 매도 또는 포지션 재검토 필요</div>',
+                    unsafe_allow_html=True
+                )
+            elif is_tp1:
+                st.markdown(
+                    '<div class="verdict-banner verdict-hold">'
+                    '💡 +15% 목표 달성 — 분할 익절 또는 트레일링 스탑 고려</div>',
+                    unsafe_allow_html=True
+                )
+
+            # 삭제 버튼
+            if st.button(f"🗑️ {pos['name']} 삭제", key=f"del_{idx_p}"):
+                st.session_state.portfolio.pop(idx_p)
+                st.rerun()
+
+        # 전체 초기화
+        if st.button("🗑️ 전체 초기화", type="secondary"):
+            st.session_state.portfolio = []
+            st.rerun()
+
+
 def badge(text, kind):
     cls = {'pos':'b-pos','neg':'b-neg','neu':'b-neu','warn':'b-warn'}.get(kind,'b-neu')
     return f'<span class="badge {cls}">{text}</span>'
@@ -774,10 +978,14 @@ def ind_row(name, val_str, badge_text, badge_kind):
     </div>"""
 
 def main():
+    # 세션 초기화
+    if 'portfolio' not in st.session_state:
+        st.session_state.portfolio = []
+
     ticker, resolved_name, has_pos, avg_price, run = sidebar()
 
-    st.markdown("# 📡 Luna-Signal")
-    st.markdown("<div style='color:#475569;font-size:0.9rem;margin-bottom:1.5rem'>20거래일 스윙 매수 적합도 분석 — G_US_F1 신호 엔진 v0.1</div>", unsafe_allow_html=True)
+    st.markdown("# 🌙 Luna-Signal")
+    st.markdown("<div style='color:#475569;font-size:0.9rem;margin-bottom:1.5rem'>20거래일 스윙 매수 적합도 분석 — G_US_F1 신호 엔진 v1.0</div>", unsafe_allow_html=True)
 
     if not run:
         # ── 기본화면: 전종목 스크리닝 상위 10개 ─────────────────
@@ -871,8 +1079,7 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
                     # 종목 클릭 → 분석 실행 버튼
                     if st.button(f"🔍 {r['name']} 분석", key=f"home_{home_market}_{r['ticker']}",
                                   use_container_width=False):
-                        st.session_state['quick_ticker'] = r['ticker']
-                        st.session_state['quick_name']   = r['name']
+                        st.session_state['quick_ticker_input'] = r['ticker']
                         st.rerun()
 
                 st.markdown(
@@ -1033,6 +1240,10 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
                 unsafe_allow_html=True
             )
 
+        # ── 보유종목 관리 탭 (항상 표시) ───────────────────
+        st.divider()
+        st.markdown('<div class="sec-hdr">💼 보유종목 추가/관리</div>', unsafe_allow_html=True)
+        _render_portfolio_tab()
         return
 
     # 데이터 로딩
@@ -1554,190 +1765,7 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
 
     # ── 탭6: 보유종목 관리 ────────────────────────────────
     with tab6:
-        st.markdown('<div class="sec-hdr">💼 보유종목 손절 관리</div>', unsafe_allow_html=True)
-        st.markdown(
-            "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
-            "보유 종목을 등록하면 손절선(-8%)과 현재 손익을 실시간으로 모니터링합니다.</div>",
-            unsafe_allow_html=True
-        )
-
-        # 세션 상태 초기화
-        if 'portfolio' not in st.session_state:
-            st.session_state.portfolio = []
-
-        # ── 종목 추가 폼 ──────────────────────────────────
-        st.markdown('<div class="sec-hdr">종목 추가</div>', unsafe_allow_html=True)
-        p1, p2, p3, p4 = st.columns([2, 1.5, 1.5, 1])
-        with p1:
-            new_ticker = st.text_input("티커 또는 종목명", key="port_ticker",
-                                        placeholder="AAPL, 삼성전자 등").strip()
-        with p2:
-            new_price  = st.number_input("평균 매수가", min_value=0.01,
-                                          value=100.0, step=0.01, key="port_price")
-        with p3:
-            new_shares = st.number_input("수량 (주)", min_value=1,
-                                          value=10, step=1, key="port_shares")
-        with p4:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            add_btn = st.button("➕ 추가", use_container_width=True)
-
-        if add_btn and new_ticker:
-            # 티커 변환
-            resolved_t, resolved_n = resolve_ticker(new_ticker)
-            if resolved_t != 'UNKNOWN':
-                # 현재가 조회
-                try:
-                    df_p = fetch(resolved_t, days=10)
-                    curr_p = float(df_p['Close'].iloc[-1]) if len(df_p) > 0 else new_price
-                    curr_date = df_p.index[-1].strftime('%Y-%m-%d') if len(df_p) > 0 else '-'
-                except:
-                    curr_p = new_price
-                    curr_date = '-'
-
-                st.session_state.portfolio.append({
-                    'ticker':     resolved_t,
-                    'name':       resolved_n,
-                    'avg_price':  new_price,
-                    'shares':     new_shares,
-                    'curr_price': curr_p,
-                    'curr_date':  curr_date,
-                    'sl_price':   round(new_price * 0.92, 2),
-                    'tp1_price':  round(new_price * 1.15, 2),
-                    'tp2_price':  round(new_price * 1.25, 2),
-                })
-                st.success(f"✅ {resolved_n} ({resolved_t}) 추가됨")
-                st.rerun()
-            else:
-                st.error("종목을 찾지 못했습니다. 티커를 직접 입력해주세요.")
-
-        # ── 보유종목 테이블 ───────────────────────────────
-        if not st.session_state.portfolio:
-            st.info("보유 종목이 없습니다. 위에서 종목을 추가해주세요.")
-        else:
-            # 현재가 새로고침 버튼
-            col_r1, col_r2 = st.columns([1, 5])
-            with col_r1:
-                if st.button("🔄 현재가 갱신", use_container_width=True):
-                    for pos in st.session_state.portfolio:
-                        try:
-                            df_p = fetch(pos['ticker'], days=10)
-                            if len(df_p) > 0:
-                                pos['curr_price'] = float(df_p['Close'].iloc[-1])
-                                pos['curr_date']  = df_p.index[-1].strftime('%Y-%m-%d')
-                        except:
-                            pass
-                    st.rerun()
-
-            st.divider()
-
-            # 포트폴리오 요약
-            total_cost    = sum(p['avg_price'] * p['shares'] for p in st.session_state.portfolio)
-            total_curr    = sum(p['curr_price'] * p['shares'] for p in st.session_state.portfolio)
-            total_pnl     = total_curr - total_cost
-            total_pnl_pct = (total_curr / total_cost - 1) * 100 if total_cost > 0 else 0
-            pnl_color     = '#22c55e' if total_pnl >= 0 else '#ef4444'
-
-            s1, s2, s3, s4 = st.columns(4)
-            with s1: st.metric("보유 종목 수", f"{len(st.session_state.portfolio)}개")
-            with s2: st.metric("총 매수금액", f"${total_cost:,.0f}")
-            with s3: st.metric("총 평가금액", f"${total_curr:,.0f}")
-            with s4: st.metric("총 손익", f"{total_pnl_pct:+.2f}%",
-                                delta=f"${total_pnl:+,.0f}")
-
-            st.divider()
-
-            # 종목별 카드
-            for idx_p, pos in enumerate(st.session_state.portfolio):
-                pnl_pct   = (pos['curr_price'] / pos['avg_price'] - 1) * 100
-                pnl_amt   = (pos['curr_price'] - pos['avg_price']) * pos['shares']
-                is_sl     = pos['curr_price'] <= pos['sl_price']
-                is_tp1    = pos['curr_price'] >= pos['tp1_price']
-
-                if is_sl:
-                    card_bg  = '#1a0a0a'
-                    card_bdr = '#ef4444'
-                    status   = '⚠️ 손절선 이탈'
-                    st_color = '#ef4444'
-                elif is_tp1:
-                    card_bg  = '#0f2d1a'
-                    card_bdr = '#22c55e'
-                    status   = '🎯 1차 목표 달성'
-                    st_color = '#22c55e'
-                else:
-                    pnl_color_c = '#22c55e' if pnl_pct >= 0 else '#ef4444'
-                    card_bg  = '#0f1623'
-                    card_bdr = '#1e2a3a'
-                    status   = f"{'▲' if pnl_pct>=0 else '▼'} {pnl_pct:+.2f}%"
-                    st_color = '#22c55e' if pnl_pct >= 0 else '#ef4444'
-
-                # 손절까지 거리
-                sl_gap = (pos['curr_price'] / pos['sl_price'] - 1) * 100
-
-                st.markdown(f"""
-                <div style="background:{card_bg};border:1px solid {card_bdr};
-                    border-radius:10px;padding:1rem 1.2rem;margin-bottom:8px">
-                    <div style="display:flex;justify-content:space-between;
-                        align-items:center;margin-bottom:10px">
-                        <div>
-                            <span style="font-weight:700;color:#e2e8f0;font-size:1rem">{pos['name']}</span>
-                            <span style="color:#475569;font-size:0.78rem;margin-left:8px">{pos['ticker']}</span>
-                            <span style="color:#334155;font-size:0.72rem;margin-left:8px">{pos['shares']}주</span>
-                        </div>
-                        <span style="color:{st_color};font-weight:700;font-size:0.92rem">{status}</span>
-                    </div>
-                    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;
-                        font-family:Space Mono,monospace;font-size:0.82rem">
-                        <div>
-                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평균 매수가</div>
-                            <div style="color:#94a3b8">${pos['avg_price']:.2f}</div>
-                        </div>
-                        <div>
-                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">현재가 ({pos['curr_date']})</div>
-                            <div style="color:#e2e8f0;font-weight:600">${pos['curr_price']:.2f}</div>
-                        </div>
-                        <div>
-                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">손절선 (-8%)</div>
-                            <div style="color:#ef4444">${pos['sl_price']:.2f}
-                                <span style="font-size:0.68rem;color:#64748b">({sl_gap:+.1f}%)</span>
-                            </div>
-                        </div>
-                        <div>
-                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">1차 목표 (+15%)</div>
-                            <div style="color:#22c55e">${pos['tp1_price']:.2f}</div>
-                        </div>
-                        <div>
-                            <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평가손익</div>
-                            <div style="color:{'#22c55e' if pnl_amt>=0 else '#ef4444'};font-weight:700">
-                                ${pnl_amt:+,.0f}</div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                # 손절 경고 배너
-                if is_sl:
-                    st.markdown(
-                        '<div class="verdict-banner verdict-sell">'
-                        '⚠️ 손절선 이탈 — 즉시 매도 또는 포지션 재검토 필요</div>',
-                        unsafe_allow_html=True
-                    )
-                elif is_tp1:
-                    st.markdown(
-                        '<div class="verdict-banner verdict-hold">'
-                        '💡 +15% 목표 달성 — 분할 익절 또는 트레일링 스탑 고려</div>',
-                        unsafe_allow_html=True
-                    )
-
-                # 삭제 버튼
-                if st.button(f"🗑️ {pos['name']} 삭제", key=f"del_{idx_p}"):
-                    st.session_state.portfolio.pop(idx_p)
-                    st.rerun()
-
-            # 전체 초기화
-            if st.button("🗑️ 전체 초기화", type="secondary"):
-                st.session_state.portfolio = []
-                st.rerun()
-
+        _render_portfolio_tab()
 
     # 면책 고지
     st.markdown("""
