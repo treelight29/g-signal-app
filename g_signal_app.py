@@ -18,8 +18,16 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
-import warnings
+import warnings, json
 warnings.filterwarnings('ignore')
+
+# Google Sheets 연동
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSHEETS_OK = True
+except ImportError:
+    GSHEETS_OK = False
 
 # ══════════════════════════════════════════════════════════
 # 페이지 설정
@@ -195,47 +203,9 @@ def resolve_ticker(query: str) -> tuple[str, str]:
     if re.match(r'^[A-Z0-9\.\-\^]{1,10}$', query.upper()):
         return query.upper(), query.upper()
 
-    # 종목명 → Claude API로 티커 추출
-    try:
-        import json, requests
-        prompt = f"""다음 종목명에 해당하는 Yahoo Finance 티커 심볼을 알려주세요.
-
-종목명: {query}
-
-규칙:
-- 미국 상장 주식은 그냥 티커 (예: AAPL, NVDA, TSLA)
-- 한국 주식은 숫자6자리.KS 형식 (예: 005930.KS)
-- 반드시 JSON 형식으로만 답하세요: {{"ticker": "AAPL", "name": "Apple Inc."}}
-- 모르면: {{"ticker": "UNKNOWN", "name": "알 수 없음"}}
-- JSON 외 다른 텍스트 절대 금지"""
-
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 100,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=10
-        )
-        data = response.json()
-        text = data['content'][0]['text'].strip()
-
-        # JSON 파싱
-        text = text.replace('```json','').replace('```','').strip()
-        result = json.loads(text)
-        ticker = result.get('ticker', 'UNKNOWN')
-        name   = result.get('name', query)
-
-        if ticker == 'UNKNOWN':
-            return query.upper(), query
-
-        return ticker, name
-
-    except Exception:
-        # API 실패 시 입력값 그대로 사용
-        return query.upper(), query
+    # 종목명 입력 시 티커로 그대로 사용 (API 키 없음)
+    # 티커 직접 입력 필요: AAPL, 005930.KS 등
+    return query.upper(), query
 
 
 # ══════════════════════════════════════════════════════════
@@ -770,28 +740,163 @@ def sidebar():
 # ══════════════════════════════════════════════════════════
 # 메인
 # ══════════════════════════════════════════════════════════
+def _save_portfolio():
+    """보유종목을 localStorage에 저장 (브라우저 영구 저장)"""
+    import json
+    data = json.dumps(st.session_state.portfolio, ensure_ascii=False)
+    # st.components로 localStorage 저장
+    import streamlit.components.v1 as components
+    components.html(f"""
+    <script>
+    try {{
+        localStorage.setItem('luna_portfolio', {repr(data)});
+    }} catch(e) {{}}
+    </script>
+    """, height=0)
+
+def _load_portfolio():
+    """localStorage에서 보유종목 불러오기"""
+    import streamlit.components.v1 as components
+    import json
+    # localStorage 읽기 + hidden input으로 전달
+    components.html("""
+    <script>
+    try {
+        var d = localStorage.getItem('luna_portfolio');
+        if (d) {
+            var el = window.parent.document.querySelector('[data-testid="stHidden"]');
+        }
+    } catch(e) {}
+    </script>
+    """, height=0)
+
+# ══════════════════════════════════════════════════════════
+# Google Sheets 연동 함수
+# ══════════════════════════════════════════════════════════
+
+@st.cache_resource
+def get_gsheet():
+    """Google Sheets 연결 (캐시)"""
+    if not GSHEETS_OK:
+        return None
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds  = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet_id = st.secrets.get("GOOGLE_SHEETS_ID", "")
+        if not sheet_id:
+            return None
+        sh = client.open_by_key(sheet_id)
+        # 시트1 사용 (없으면 생성)
+        try:
+            ws = sh.worksheet("보유종목")
+        except:
+            ws = sh.add_worksheet("보유종목", rows=200, cols=15)
+            # 헤더 추가
+            ws.append_row([
+                "ticker","name","avg_price","shares",
+                "curr_price","curr_date","sl_price","tp1_price","tp2_price"
+            ])
+        return ws
+    except Exception as e:
+        return None
+
+
+def load_portfolio_from_sheets():
+    """Google Sheets에서 보유종목 로드"""
+    ws = get_gsheet()
+    if ws is None:
+        return []
+    try:
+        records = ws.get_all_records()
+        portfolio = []
+        for r in records:
+            if not r.get('ticker'):
+                continue
+            portfolio.append({
+                'ticker':     str(r.get('ticker', '')),
+                'name':       str(r.get('name', '')),
+                'avg_price':  float(r.get('avg_price', 0)),
+                'shares':     int(r.get('shares', 0)),
+                'curr_price': float(r.get('curr_price', 0)),
+                'curr_date':  str(r.get('curr_date', '-')),
+                'sl_price':   float(r.get('sl_price', 0)),
+                'tp1_price':  float(r.get('tp1_price', 0)),
+                'tp2_price':  float(r.get('tp2_price', 0)),
+            })
+        return portfolio
+    except:
+        return []
+
+
+def save_portfolio_to_sheets(portfolio):
+    """보유종목 전체를 Google Sheets에 저장"""
+    ws = get_gsheet()
+    if ws is None:
+        return False
+    try:
+        # 기존 데이터 삭제 (헤더 제외)
+        ws.clear()
+        ws.append_row([
+            "ticker","name","avg_price","shares",
+            "curr_price","curr_date","sl_price","tp1_price","tp2_price"
+        ])
+        for pos in portfolio:
+            ws.append_row([
+                pos.get('ticker',''),
+                pos.get('name',''),
+                pos.get('avg_price', 0),
+                pos.get('shares', 0),
+                pos.get('curr_price', 0),
+                pos.get('curr_date', '-'),
+                pos.get('sl_price', 0),
+                pos.get('tp1_price', 0),
+                pos.get('tp2_price', 0),
+            ])
+        return True
+    except:
+        return False
+
+
 def _render_portfolio_tab():
     """보유종목 관리 — 홈화면 및 탭6 공통 사용"""
-    st.markdown(
-        "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
-        "보유 종목을 등록하면 손절선(-8%)과 현재 손익을 실시간으로 모니터링합니다.</div>",
-        unsafe_allow_html=True
-    )
+    import json
+
+    # ── 세션 초기화 및 localStorage 복원 ──────────────────
     if 'portfolio' not in st.session_state:
         st.session_state.portfolio = []
+        st.session_state['portfolio_loaded'] = False
 
-    st.markdown('<div class="sec-hdr">💼 보유종목 손절 관리</div>', unsafe_allow_html=True)
-    st.markdown(
-        "<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>"
-        "보유 종목을 등록하면 손절선(-8%)과 현재 손익을 실시간으로 모니터링합니다.</div>",
-        unsafe_allow_html=True
-    )
+    # localStorage 저장/복원 컴포넌트
+    import streamlit.components.v1 as components
 
-    # 세션 상태 초기화
-    if 'portfolio' not in st.session_state:
-        st.session_state.portfolio = []
+    # 저장된 데이터 로드 (최초 1회)
+    if not st.session_state.get('portfolio_loaded', False):
+        result = components.html("""
+        <script>
+        var stored = localStorage.getItem('luna_portfolio');
+        if (stored) {
+            // Streamlit에 데이터 전달
+            window.parent.postMessage({type: 'luna_portfolio', data: stored}, '*');
+        }
+        </script>
+        <div id="portfolio_data" style="display:none"></div>
+        """, height=0)
+        st.session_state['portfolio_loaded'] = True
 
-    # ── 종목 추가 폼 (st.form 사용 → Tab키 문제 해결) ──
+    # ── 안내 문구 ──────────────────────────────────────────
+    sheets_ok_tab = get_gsheet() is not None
+    if sheets_ok_tab:
+        st.markdown("<div class='f1-box f1-ok'>✅ Google Sheets 연동됨 — 보유종목 자동 저장/복원</div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='f1-box f1-warn'>⚠️ Google Sheets 미연결 — 세션 종료 시 초기화됩니다</div>", unsafe_allow_html=True)
+    st.markdown("<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>보유 종목 등록 시 손절선(-8%)과 현재 손익을 모니터링합니다.</div>", unsafe_allow_html=True)
+
+    # ── 종목 추가 폼 ──────────────────────────────────────
     st.markdown('<div class="sec-hdr">종목 추가</div>', unsafe_allow_html=True)
     with st.form("add_portfolio_form", clear_on_submit=True):
         p1, p2, p3, p4 = st.columns([2, 1.5, 1.5, 1])
@@ -809,19 +914,17 @@ def _render_portfolio_tab():
             add_btn = st.form_submit_button("➕ 추가", use_container_width=True)
 
     if add_btn and new_ticker.strip():
-        # 티커 변환
         resolved_t, resolved_n = resolve_ticker(new_ticker.strip())
         if resolved_t != 'UNKNOWN':
-            # 현재가 조회
             try:
                 df_p = fetch(resolved_t, days=10)
-                curr_p = float(df_p['Close'].iloc[-1]) if len(df_p) > 0 else new_price
+                curr_p    = float(df_p['Close'].iloc[-1]) if len(df_p) > 0 else new_price
                 curr_date = df_p.index[-1].strftime('%Y-%m-%d') if len(df_p) > 0 else '-'
             except:
-                curr_p = new_price
+                curr_p    = new_price
                 curr_date = '-'
 
-            st.session_state.portfolio.append({
+            new_pos = {
                 'ticker':     resolved_t,
                 'name':       resolved_n,
                 'avg_price':  new_price,
@@ -831,17 +934,19 @@ def _render_portfolio_tab():
                 'sl_price':   round(new_price * 0.92, 2),
                 'tp1_price':  round(new_price * 1.15, 2),
                 'tp2_price':  round(new_price * 1.25, 2),
-            })
-            st.success(f"✅ {resolved_n} ({resolved_t}) 추가됨")
+            }
+            st.session_state.portfolio.append(new_pos)
+            with st.spinner("Google Sheets에 저장 중..."):
+                ok = save_portfolio_to_sheets(st.session_state.portfolio)
+            st.success(f"✅ {resolved_n} ({resolved_t}) {'저장 완료' if ok else '추가됨 (시트 저장 실패)'}")
             st.rerun()
         else:
             st.error("종목을 찾지 못했습니다. 티커를 직접 입력해주세요.")
 
-    # ── 보유종목 테이블 ───────────────────────────────
+    # ── 보유종목 테이블 ───────────────────────────────────
     if not st.session_state.portfolio:
         st.info("보유 종목이 없습니다. 위에서 종목을 추가해주세요.")
     else:
-        # 현재가 새로고침 버튼
         col_r1, col_r2 = st.columns([1, 5])
         with col_r1:
             if st.button("🔄 현재가 갱신", use_container_width=True):
@@ -853,7 +958,11 @@ def _render_portfolio_tab():
                             pos['curr_date']  = df_p.index[-1].strftime('%Y-%m-%d')
                     except:
                         pass
+                # 갱신 후 저장
+                save_portfolio_to_sheets(st.session_state.portfolio)
                 st.rerun()
+
+
 
         st.divider()
 
@@ -862,7 +971,6 @@ def _render_portfolio_tab():
         total_curr    = sum(p['curr_price'] * p['shares'] for p in st.session_state.portfolio)
         total_pnl     = total_curr - total_cost
         total_pnl_pct = (total_curr / total_cost - 1) * 100 if total_cost > 0 else 0
-        pnl_color     = '#22c55e' if total_pnl >= 0 else '#ef4444'
 
         s1, s2, s3, s4 = st.columns(4)
         with s1: st.metric("보유 종목 수", f"{len(st.session_state.portfolio)}개")
@@ -875,30 +983,22 @@ def _render_portfolio_tab():
 
         # 종목별 카드
         for idx_p, pos in enumerate(st.session_state.portfolio):
-            pnl_pct   = (pos['curr_price'] / pos['avg_price'] - 1) * 100
-            pnl_amt   = (pos['curr_price'] - pos['avg_price']) * pos['shares']
-            is_sl     = pos['curr_price'] <= pos['sl_price']
-            is_tp1    = pos['curr_price'] >= pos['tp1_price']
+            pnl_pct = (pos['curr_price'] / pos['avg_price'] - 1) * 100
+            pnl_amt = (pos['curr_price'] - pos['avg_price']) * pos['shares']
+            is_sl   = pos['curr_price'] <= pos['sl_price']
+            is_tp1  = pos['curr_price'] >= pos['tp1_price']
+            sl_gap  = (pos['curr_price'] / pos['sl_price'] - 1) * 100
 
             if is_sl:
-                card_bg  = '#1a0a0a'
-                card_bdr = '#ef4444'
-                status   = '⚠️ 손절선 이탈'
-                st_color = '#ef4444'
+                card_bg='#1a0a0a'; card_bdr='#ef4444'
+                status=f"⚠️ 손절선 이탈"; st_color='#ef4444'
             elif is_tp1:
-                card_bg  = '#0f2d1a'
-                card_bdr = '#22c55e'
-                status   = '🎯 1차 목표 달성'
-                st_color = '#22c55e'
+                card_bg='#0f2d1a'; card_bdr='#22c55e'
+                status=f"🎯 1차 목표 달성"; st_color='#22c55e'
             else:
-                pnl_color_c = '#22c55e' if pnl_pct >= 0 else '#ef4444'
-                card_bg  = '#0f1623'
-                card_bdr = '#1e2a3a'
-                status   = f"{'▲' if pnl_pct>=0 else '▼'} {pnl_pct:+.2f}%"
-                st_color = '#22c55e' if pnl_pct >= 0 else '#ef4444'
-
-            # 손절까지 거리
-            sl_gap = (pos['curr_price'] / pos['sl_price'] - 1) * 100
+                card_bg='#0f1623'; card_bdr='#1e2a3a'
+                status=f"{'▲' if pnl_pct>=0 else '▼'} {pnl_pct:+.2f}%"
+                st_color='#22c55e' if pnl_pct>=0 else '#ef4444'
 
             st.markdown(f"""
             <div style="background:{card_bg};border:1px solid {card_bdr};
@@ -910,60 +1010,50 @@ def _render_portfolio_tab():
                         <span style="color:#475569;font-size:0.78rem;margin-left:8px">{pos['ticker']}</span>
                         <span style="color:#334155;font-size:0.72rem;margin-left:8px">{pos['shares']}주</span>
                     </div>
-                    <span style="color:{st_color};font-weight:700;font-size:0.92rem">{status}</span>
+                    <span style="color:{st_color};font-weight:700">{status}</span>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;
                     font-family:Space Mono,monospace;font-size:0.82rem">
-                    <div>
-                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평균 매수가</div>
-                        <div style="color:#94a3b8">${pos['avg_price']:.2f}</div>
-                    </div>
-                    <div>
-                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">현재가 ({pos['curr_date']})</div>
-                        <div style="color:#e2e8f0;font-weight:600">${pos['curr_price']:.2f}</div>
-                    </div>
-                    <div>
-                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">손절선 (-8%)</div>
+                    <div><div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평균매수가</div>
+                        <div style="color:#94a3b8">${pos['avg_price']:.2f}</div></div>
+                    <div><div style="color:#475569;font-size:0.68rem;margin-bottom:2px">현재가({pos['curr_date']})</div>
+                        <div style="color:#e2e8f0;font-weight:600">${pos['curr_price']:.2f}</div></div>
+                    <div><div style="color:#475569;font-size:0.68rem;margin-bottom:2px">손절선(-8%)</div>
                         <div style="color:#ef4444">${pos['sl_price']:.2f}
-                            <span style="font-size:0.68rem;color:#64748b">({sl_gap:+.1f}%)</span>
-                        </div>
-                    </div>
-                    <div>
-                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">1차 목표 (+15%)</div>
-                        <div style="color:#22c55e">${pos['tp1_price']:.2f}</div>
-                    </div>
-                    <div>
-                        <div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평가손익</div>
+                        <span style="font-size:0.68rem;color:#64748b">({sl_gap:+.1f}%)</span></div></div>
+                    <div><div style="color:#475569;font-size:0.68rem;margin-bottom:2px">1차목표(+15%)</div>
+                        <div style="color:#22c55e">${pos['tp1_price']:.2f}</div></div>
+                    <div><div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평가손익</div>
                         <div style="color:{'#22c55e' if pnl_amt>=0 else '#ef4444'};font-weight:700">
-                            ${pnl_amt:+,.0f}</div>
-                    </div>
+                        ${pnl_amt:+,.0f}</div></div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+            </div>""", unsafe_allow_html=True)
 
-            # 손절 경고 배너
             if is_sl:
-                st.markdown(
-                    '<div class="verdict-banner verdict-sell">'
-                    '⚠️ 손절선 이탈 — 즉시 매도 또는 포지션 재검토 필요</div>',
-                    unsafe_allow_html=True
-                )
+                st.markdown('<div class="verdict-banner verdict-sell">⚠️ 손절선 이탈 — 즉시 매도 또는 포지션 재검토</div>', unsafe_allow_html=True)
             elif is_tp1:
-                st.markdown(
-                    '<div class="verdict-banner verdict-hold">'
-                    '💡 +15% 목표 달성 — 분할 익절 또는 트레일링 스탑 고려</div>',
-                    unsafe_allow_html=True
-                )
+                st.markdown('<div class="verdict-banner verdict-hold">💡 +15% 목표 달성 — 분할 익절 또는 트레일링 스탑 고려</div>', unsafe_allow_html=True)
 
-            # 삭제 버튼
             if st.button(f"🗑️ {pos['name']} 삭제", key=f"del_{idx_p}"):
                 st.session_state.portfolio.pop(idx_p)
+                # 삭제 후 저장
+                with st.spinner("저장 중..."):
+                    save_portfolio_to_sheets(st.session_state.portfolio)
                 st.rerun()
+
+
+
+
 
         # 전체 초기화
         if st.button("🗑️ 전체 초기화", type="secondary"):
             st.session_state.portfolio = []
+            with st.spinner("저장 중..."):
+                save_portfolio_to_sheets([])
             st.rerun()
+
+
+
 
 
 def badge(text, kind):
@@ -978,9 +1068,12 @@ def ind_row(name, val_str, badge_text, badge_kind):
     </div>"""
 
 def main():
-    # 세션 초기화
+    # 세션 초기화 — Google Sheets에서 로드
     if 'portfolio' not in st.session_state:
-        st.session_state.portfolio = []
+        with st.spinner("보유종목 불러오는 중..."):
+            st.session_state.portfolio = load_portfolio_from_sheets()
+    if 'sheets_ok' not in st.session_state:
+        st.session_state.sheets_ok = get_gsheet() is not None
 
     ticker, resolved_name, has_pos, avg_price, run = sidebar()
 
