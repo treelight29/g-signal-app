@@ -803,6 +803,7 @@ def get_gsheet():
             ])
         return ws
     except Exception as e:
+        st.session_state['sheets_error'] = str(e)
         return None
 
 
@@ -894,6 +895,9 @@ def _render_portfolio_tab():
         st.markdown("<div class='f1-box f1-ok'>✅ Google Sheets 연동됨 — 보유종목 자동 저장/복원</div>", unsafe_allow_html=True)
     else:
         st.markdown("<div class='f1-box f1-warn'>⚠️ Google Sheets 미연결 — 세션 종료 시 초기화됩니다</div>", unsafe_allow_html=True)
+        err = st.session_state.get('sheets_error', '')
+        if err:
+            st.error(f"🔍 오류 내용: {err}")
     st.markdown("<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>보유 종목 등록 시 손절선(-8%)과 현재 손익을 모니터링합니다.</div>", unsafe_allow_html=True)
 
     # ── 종목 추가 폼 ──────────────────────────────────────
