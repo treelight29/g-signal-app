@@ -984,6 +984,12 @@ def main():
 
     ticker, resolved_name, has_pos, avg_price, run = sidebar()
 
+    # ★ 돋보기 버튼으로 분석 요청된 경우 ticker 덮어쓰기
+    if 'analyze_ticker' in st.session_state and not run:
+        ticker        = st.session_state['analyze_ticker']
+        resolved_name = st.session_state.get('analyze_name', ticker)
+        run           = True   # 분석 실행으로 처리
+
     st.markdown("# 🌙 Luna-Signal")
     st.markdown("<div style='color:#475569;font-size:0.9rem;margin-bottom:1.5rem'>20거래일 스윙 매수 적합도 분석 — G_US_F1 신호 엔진 v1.0</div>", unsafe_allow_html=True)
 
@@ -1079,7 +1085,8 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
                     # 종목 클릭 → 분석 실행 버튼
                     if st.button(f"🔍 {r['name']} 분석", key=f"home_{home_market}_{r['ticker']}",
                                   use_container_width=False):
-                        st.session_state['quick_ticker_input'] = r['ticker']
+                        st.session_state['analyze_ticker'] = r['ticker']
+                        st.session_state['analyze_name']   = r['name']
                         st.rerun()
 
                 st.markdown(
@@ -1247,6 +1254,10 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
         return
 
     # 데이터 로딩
+    # ★ 돋보기 분석 세션 정리
+    st.session_state.pop('analyze_ticker', None)
+    st.session_state.pop('analyze_name', None)
+
     with st.spinner(f"{ticker} 분석 중..."):
         try:
             df  = fetch(ticker)
