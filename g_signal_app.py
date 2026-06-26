@@ -29,6 +29,13 @@ try:
 except ImportError:
     GSHEETS_OK = False
 
+# FinanceDataReader (국내주식 정확한 데이터)
+try:
+    import FinanceDataReader as fdr
+    FDR_OK = True
+except ImportError:
+    FDR_OK = False
+
 # ══════════════════════════════════════════════════════════
 # 페이지 설정
 # ══════════════════════════════════════════════════════════
@@ -215,9 +222,33 @@ def resolve_ticker(query: str) -> tuple[str, str]:
 def fetch(ticker: str, days=400) -> pd.DataFrame:
     end   = datetime.today()
     start = end - timedelta(days=days)
+
+    # 국내주식: FinanceDataReader 사용 (더 정확한 KRX 데이터)
+    is_kr = ticker.endswith('.KS') or ticker.endswith('.KQ')
+    if is_kr and FDR_OK:
+        try:
+            # 티커에서 숫자 코드만 추출 (005930.KS → 005930)
+            code = ticker.split('.')[0]
+            df = fdr.DataReader(code, start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))
+            if df is not None and len(df) > 0:
+                # FDR 컬럼명 통일
+                df = df.rename(columns={
+                    'Open': 'Open', 'High': 'High', 'Low': 'Low',
+                    'Close': 'Close', 'Volume': 'Volume',
+                    'Adj Close': 'Close'
+                })
+                # 필요한 컬럼만
+                cols = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
+                return df[cols].dropna()
+        except Exception:
+            pass  # FDR 실패 시 yfinance로 폴백
+
+    # 미국주식 또는 FDR 실패: yfinance 사용
     df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    if 'Close' not in df.columns and len(df.columns) > 0:
+        return df.dropna()
     return df[['Open','High','Low','Close','Volume']].dropna()
 
 @st.cache_data(ttl=300)
@@ -643,7 +674,7 @@ def make_chart(df: pd.DataFrame, ticker: str,
                        line_dash='dash', annotation_text=f'매수가 {avg_price:.2f}',
                        annotation_font_color='#22c55e', row=1, col=1)
         fig.add_hline(y=sl, line_color='#ef4444', line_width=1.2,
-                       line_dash='dash', annotation_text=f'손절 {sl:.2f} (-8%)',
+                       line_dash='dash', annotation_text=f'손절 {fmt_price(sl, ticker)} (-8%)',
                        annotation_font_color='#ef4444', row=1, col=1)
 
     # RSI
@@ -1002,10 +1033,10 @@ def _render_portfolio_tab():
 
         s1, s2, s3, s4 = st.columns(4)
         with s1: st.metric("보유 종목 수", f"{len(st.session_state.portfolio)}개")
-        with s2: st.metric("총 매수금액", f"${total_cost:,.0f}")
-        with s3: st.metric("총 평가금액", f"${total_curr:,.0f}")
+        with s2: st.metric("총 매수금액", f"{total_cost:,.0f}")
+        with s3: st.metric("총 평가금액", f"{total_curr:,.0f}")
         with s4: st.metric("총 손익", f"{total_pnl_pct:+.2f}%",
-                            delta=f"${total_pnl:+,.0f}")
+                            delta=f"{total_pnl:+,.0f}")
 
         st.divider()
 
@@ -1053,7 +1084,7 @@ def _render_portfolio_tab():
                         <div style="color:#22c55e">${pos['tp1_price']:.2f}</div></div>
                     <div><div style="color:#475569;font-size:0.68rem;margin-bottom:2px">평가손익</div>
                         <div style="color:{'#22c55e' if pnl_amt>=0 else '#ef4444'};font-weight:700">
-                        ${pnl_amt:+,.0f}</div></div>
+                        {fmt_price_delta(pnl_amt, pos.get("ticker",""))}</div></div>
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -1082,6 +1113,27 @@ def _render_portfolio_tab():
 
 
 
+
+
+def fmt_price(price: float, ticker: str) -> str:
+    """티커 기반 통화 자동 판별 가격 포맷"""
+    is_kr = ticker.endswith('.KS') or ticker.endswith('.KQ')
+    if is_kr:
+        return f"₩{price:,.0f}"
+    else:
+        return f"${price:,.2f}"
+
+def fmt_currency(ticker: str) -> str:
+    """통화 기호 반환"""
+    return "₩" if (ticker.endswith('.KS') or ticker.endswith('.KQ')) else "$"
+
+def fmt_price_delta(amount: float, ticker: str) -> str:
+    """손익 금액 포맷"""
+    is_kr = ticker.endswith('.KS') or ticker.endswith('.KQ')
+    if is_kr:
+        return f"₩{amount:+,.0f}"
+    else:
+        return f"${amount:+,.2f}"
 
 
 def badge(text, kind):
@@ -1337,8 +1389,9 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
                 sell_disp = f"{sell_s}%" if sell_s is not None else '—'
 
                 sl_warn = ' ⚠️' if is_sl else ''
-                curr_str = f"${pos['curr_price']:,.2f}"
-                avg_str  = f"${pos['avg_price']:,.2f}"
+                _t = pos.get('ticker','')
+                curr_str = fmt_price(pos['curr_price'], _t)
+                avg_str  = fmt_price(pos['avg_price'],  _t)
 
                 st.markdown(f"""
                 <div style="display:grid;
@@ -1351,8 +1404,8 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
                     <div style="text-align:right;color:#64748b">{avg_str}</div>
                     <div style="text-align:right;color:#e2e8f0;font-weight:600">{curr_str}</div>
                     <div style="text-align:right;color:{pnl_color};font-weight:700">{pnl_pct:+.1f}%</div>
-                    <div style="text-align:right;color:#22c55e">${tp_price:,.2f}</div>
-                    <div style="text-align:right;color:#ef4444">${sl_price:,.2f}</div>
+                    <div style="text-align:right;color:#22c55e">{fmt_price(tp_price, pos.get('ticker',''))}</div>
+                    <div style="text-align:right;color:#ef4444">{fmt_price(sl_price, pos.get('ticker',''))}</div>
                     <div style="text-align:center;color:{buy_color};font-weight:700">{buy_disp}</div>
                     <div style="text-align:center;color:#eab308">{hold_disp}</div>
                     <div style="text-align:center;color:{sell_color}">{sell_disp}</div>
@@ -1433,7 +1486,7 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
             background:#1e2a3a;color:{mode_color}'>{mode_txt}</span>
         </div>
         <div style='font-size:2rem;font-weight:700;color:#f1f5f9;font-family:Space Mono,monospace'>
-            ${close:,.2f}
+            {fmt_price(close, ticker)}
         </div>
         """, unsafe_allow_html=True)
     with h2:
@@ -1568,17 +1621,17 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
         with sc1:
             st.markdown(f"""<div class="sl-box">
             <div style='color:#64748b;font-size:0.7rem;margin-bottom:4px'>손절선 (-8%)</div>
-            <div style='color:#ef4444;font-size:1.2rem;font-weight:700'>${sl_8pct:.2f}</div>
+            <div style='color:#ef4444;font-size:1.2rem;font-weight:700'>{fmt_price(sl_8pct, ticker)}</div>
             </div>""", unsafe_allow_html=True)
         with sc2:
             st.markdown(f"""<div class="sl-box">
             <div style='color:#64748b;font-size:0.7rem;margin-bottom:4px'>1차 목표 (+15%)</div>
-            <div style='color:#22c55e;font-size:1.2rem;font-weight:700'>${tp_15:.2f}</div>
+            <div style='color:#22c55e;font-size:1.2rem;font-weight:700'>{fmt_price(tp_15, ticker)}</div>
             </div>""", unsafe_allow_html=True)
         with sc3:
             st.markdown(f"""<div class="sl-box">
             <div style='color:#64748b;font-size:0.7rem;margin-bottom:4px'>2차 목표 (+25%)</div>
-            <div style='color:#22c55e;font-size:1.2rem;font-weight:700'>${tp_25:.2f}</div>
+            <div style='color:#22c55e;font-size:1.2rem;font-weight:700'>{fmt_price(tp_25, ticker)}</div>
             </div>""", unsafe_allow_html=True)
 
         if has_pos and avg_price:
@@ -1592,11 +1645,11 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
             <div class="sl-box">
                 <div style='display:flex;justify-content:space-between;margin-bottom:8px'>
                     <span style='color:#64748b'>평균 매수가</span>
-                    <span style='font-weight:600'>${avg_price:.2f}</span>
+                    <span style='font-weight:600'>{fmt_price(avg_price, ticker)}</span>
                 </div>
                 <div style='display:flex;justify-content:space-between;margin-bottom:8px'>
                     <span style='color:#64748b'>현재가</span>
-                    <span style='font-weight:600'>${close:.2f}</span>
+                    <span style='font-weight:600'>{fmt_price(close, ticker)}</span>
                 </div>
                 <div style='display:flex;justify-content:space-between;margin-bottom:8px'>
                     <span style='color:#64748b'>수익률</span>
@@ -1604,7 +1657,7 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
                 </div>
                 <div style='display:flex;justify-content:space-between'>
                     <span style='color:#64748b'>손절선 (매수가 -8%)</span>
-                    <span style='color:#ef4444;font-weight:600'>${sl_from_entry:.2f}</span>
+                    <span style='color:#ef4444;font-weight:600'>{fmt_price(sl_from_entry, ticker)}</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
