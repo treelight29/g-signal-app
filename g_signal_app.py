@@ -890,14 +890,37 @@ def _render_portfolio_tab():
         st.session_state['portfolio_loaded'] = True
 
     # ── 안내 문구 ──────────────────────────────────────────
-    sheets_ok_tab = get_gsheet() is not None
-    if sheets_ok_tab:
+    # 디버그 모드로 직접 연결 시도
+    debug_result = "연결 시도 중..."
+    try:
+        if not GSHEETS_OK:
+            debug_result = f"gspread 패키지 미설치 (GSHEETS_OK={GSHEETS_OK})"
+        elif "gcp_service_account" not in st.secrets:
+            debug_result = "Secrets에 gcp_service_account 없음"
+        elif not st.secrets.get("GOOGLE_SHEETS_ID", ""):
+            debug_result = "Secrets에 GOOGLE_SHEETS_ID 없음"
+        else:
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            debug_result = f"인증 정보 로드 OK (email: {creds_dict.get('client_email','없음')})"
+            from google.oauth2.service_account import Credentials as C2
+            scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+            creds = C2.from_service_account_info(creds_dict, scopes=scopes)
+            debug_result = "Credentials 생성 OK"
+            import gspread as gs2
+            client = gs2.authorize(creds)
+            debug_result = "gspread 인증 OK"
+            sh = client.open_by_key(st.secrets["GOOGLE_SHEETS_ID"])
+            debug_result = f"시트 열기 OK: {sh.title}"
+            sheets_ok_tab = True
+    except Exception as e:
+        debug_result = f"오류: {str(e)}"
+        sheets_ok_tab = False
+
+    if sheets_ok_tab and "OK" in debug_result:
         st.markdown("<div class='f1-box f1-ok'>✅ Google Sheets 연동됨 — 보유종목 자동 저장/복원</div>", unsafe_allow_html=True)
     else:
-        st.markdown("<div class='f1-box f1-warn'>⚠️ Google Sheets 미연결 — 세션 종료 시 초기화됩니다</div>", unsafe_allow_html=True)
-        err = st.session_state.get('sheets_error', '')
-        if err:
-            st.error(f"🔍 오류 내용: {err}")
+        st.markdown("<div class='f1-box f1-warn'>⚠️ Google Sheets 미연결</div>", unsafe_allow_html=True)
+        st.error(f"🔍 디버그: {debug_result}")
     st.markdown("<div style='font-size:0.82rem;color:#475569;margin-bottom:1rem'>보유 종목 등록 시 손절선(-8%)과 현재 손익을 모니터링합니다.</div>", unsafe_allow_html=True)
 
     # ── 종목 추가 폼 ──────────────────────────────────────
