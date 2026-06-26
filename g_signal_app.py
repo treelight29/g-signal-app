@@ -892,6 +892,7 @@ def _render_portfolio_tab():
     # ── 안내 문구 ──────────────────────────────────────────
     # 디버그 모드로 직접 연결 시도
     debug_result = "연결 시도 중..."
+    sheets_ok_tab = False  # 초기화 먼저
     try:
         if not GSHEETS_OK:
             debug_result = f"gspread 패키지 미설치 (GSHEETS_OK={GSHEETS_OK})"
@@ -916,7 +917,7 @@ def _render_portfolio_tab():
         debug_result = f"오류: {str(e)}"
         sheets_ok_tab = False
 
-    if sheets_ok_tab and "OK" in debug_result:
+    if sheets_ok_tab:
         st.markdown("<div class='f1-box f1-ok'>✅ Google Sheets 연동됨 — 보유종목 자동 저장/복원</div>", unsafe_allow_html=True)
     else:
         st.markdown("<div class='f1-box f1-warn'>⚠️ Google Sheets 미연결</div>", unsafe_allow_html=True)
