@@ -1547,7 +1547,60 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 유니버스 순위 배너 ────────────────────────────────
+    # ── 다음 리밸런싱일 계산 (이번주 또는 다음주 금요일) ──
+    from datetime import date as date_cls
+    today_d = date_cls.today()
+    days_to_fri = (4 - today_d.weekday()) % 7
+    if days_to_fri == 0 and today_d.weekday() != 4:
+        days_to_fri = 7
+    next_friday = today_d + timedelta(days=days_to_fri if days_to_fri > 0 else 7)
+
+    # ── 3거래일 상위 20% 유지 여부 확인 ──────────────────
+    recent_above_20pct = 0
+    if not df_universe.empty and len(d) >= 3:
+        for lookback in range(3):
+            try:
+                hist_row = d.iloc[-(1+lookback)]
+                hist_g, _ = g_score(hist_row)
+                hist_pct = float((df_universe['g_raw'].values < hist_g).sum() / len(df_universe) * 100)
+                if hist_pct >= 80:
+                    recent_above_20pct += 1
+            except Exception:
+                pass
+
+    # ── 주간 공식 신호 판단 (GPT 가이드: 3일 중 2일 이상 상위20% 유지) ──
+    weekly_signal_ok = recent_above_20pct >= 2 and f1_ok
+    if weekly_signal_ok:
+        weekly_signal = "매수 후보 유지" if (avg_price if has_pos else None) is None else "보유 가능"
+        weekly_color  = "#22c55e"
+    elif f1_ok:
+        weekly_signal = "관찰 필요 (상위 20% 미달)"
+        weekly_color  = "#eab308"
+    else:
+        weekly_signal = "매수 보류 (금리충격 필터 ON)"
+        weekly_color  = "#ef4444"
+
+    st.markdown(f"""
+    <div style='background:#0f1623;border:1px solid {weekly_color};border-radius:10px;
+        padding:1rem 1.3rem;margin-bottom:0.8rem'>
+        <div style='font-size:0.68rem;letter-spacing:0.1em;text-transform:uppercase;
+            color:#3b82f6;font-weight:600;margin-bottom:8px'>
+            📌 주간 공식 신호 (매매 판단 기준)
+        </div>
+        <div style='display:flex;justify-content:space-between;align-items:center'>
+            <span style='font-size:1.05rem;font-weight:700;color:{weekly_color}'>{weekly_signal}</span>
+            <span style='font-size:0.8rem;color:#64748b'>
+                다음 리밸런싱일: <b style='color:#94a3b8'>{next_friday.strftime('%Y-%m-%d (금)')}</b>
+            </span>
+        </div>
+        <div style='font-size:0.76rem;color:#475569;margin-top:6px'>
+            최근 3거래일 중 <b style='color:#94a3b8'>{recent_above_20pct}일</b> 유니버스 상위 20% 유지
+            {' · F1 필터 OFF' if f1_ok else ' · F1 필터 ON (매수 금지)'}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 일일 컨디션 점검 (참고용 — 매매 신호 아님) ──────
     if universe_rank is not None:
         rank_pct  = round(universe_pct, 1)
         rank_color = '#22c55e' if rank_pct >= 80 else ('#eab308' if rank_pct >= 60 else '#ef4444')
@@ -1556,28 +1609,54 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
                 '보유 가능 (상위 40%)' if rank_pct >= 60 else
                 '신규매수 부적합')
         market_label = '국내' if market == 'KR' else '미국'
+
+        # 전일 대비 변화 계산
+        daily_change_text = ""
+        if len(d) >= 2:
+            try:
+                row_prev_q = d.iloc[-2]
+                g_raw_prev_q, _ = g_score(row_prev_q)
+                if not df_universe.empty:
+                    prev_pct = float((df_universe['g_raw'].values < g_raw_prev_q).sum() / len(df_universe) * 100)
+                    change_pct = rank_pct - prev_pct
+                    if abs(change_pct) >= 15:
+                        chg_color = '#22c55e' if change_pct > 0 else '#ef4444'
+                        daily_change_text = (
+                            f"<span style='color:{chg_color};font-weight:600'>"
+                            f"전일 대비 {change_pct:+.0f}%p — 일일 변동폭이 큽니다. "
+                            f"주간 신호 변경은 아닙니다.</span>"
+                        )
+            except Exception:
+                pass
+
         st.markdown(f"""
-        <div style='background:#0f1623;border:1px solid #1e2a3a;border-radius:8px;
-            padding:0.7rem 1.2rem;margin-bottom:0.8rem;
-            display:flex;justify-content:space-between;align-items:center'>
-            <span style='font-size:0.85rem;color:#94a3b8'>
-                {market_label} {universe_total}종목 유니버스 내 순위
-            </span>
-            <span>
-                <span style='font-family:Space Mono,monospace;font-size:1.1rem;
-                    font-weight:700;color:{rank_color}'>{universe_rank}위</span>
-                <span style='color:#475569;font-size:0.8rem'> / {universe_total}종목</span>
-                <span style='margin-left:10px;background:#1e2a3a;padding:2px 8px;
-                    border-radius:12px;font-size:0.78rem;color:{rank_color}'>{tier}</span>
-            </span>
+        <div style='background:#0a0e17;border:1px solid #1e2a3a;border-radius:8px;
+            padding:0.7rem 1.2rem;margin-bottom:0.8rem'>
+            <div style='font-size:0.68rem;letter-spacing:0.08em;text-transform:uppercase;
+                color:#475569;font-weight:600;margin-bottom:6px'>
+                📊 일일 컨디션 점검 (참고용 · 단독 매매신호 아님)
+            </div>
+            <div style='display:flex;justify-content:space-between;align-items:center'>
+                <span style='font-size:0.85rem;color:#94a3b8'>
+                    {market_label} {universe_total}종목 중
+                </span>
+                <span>
+                    <span style='font-family:Space Mono,monospace;font-size:1.1rem;
+                        font-weight:700;color:{rank_color}'>{universe_rank}위</span>
+                    <span style='color:#475569;font-size:0.8rem'> / {universe_total}종목</span>
+                    <span style='margin-left:10px;background:#1e2a3a;padding:2px 8px;
+                        border-radius:12px;font-size:0.78rem;color:{rank_color}'>{tier}</span>
+                </span>
+            </div>
+            {f"<div style='font-size:0.78rem;margin-top:6px'>{daily_change_text}</div>" if daily_change_text else ""}
         </div>
         """, unsafe_allow_html=True)
 
-    # ── 점수 카드 ─────────────────────────────────────────
+    # ── 점수 카드 (일일 컨디션 — 참고용) ───────────────────
     st.markdown(f"""
     <div class="score-wrap">
         <div class="score-card card-buy">
-            <div class="score-label">매수 적합도</div>
+            <div class="score-label">매수 적합도 (일일)</div>
             <div class="score-num-buy">{scores['buy']}%</div>
             <div class="score-sub">유니버스 백분위 {round(universe_pct,1)}%</div>
         </div>
@@ -1599,6 +1678,13 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
     cls_map = {'buy':'verdict-buy','hold':'verdict-hold','sell':'verdict-sell','filter':'verdict-filter'}
     st.markdown(f'<div class="verdict-banner {cls_map[v]}">{scores["verdict_text"]}</div>', unsafe_allow_html=True)
 
+    st.markdown(
+        "<div style='font-size:0.72rem;color:#334155;margin-bottom:1rem'>"
+        "💡 <b>사용 가이드:</b> 신규 매수는 <b>주간 공식 신호</b> 기준으로만 판단하세요. "
+        "일일 점수 하락만으로 매도하지 마세요 (손절선/트레일링 조건은 예외).</div>",
+        unsafe_allow_html=True
+    )
+
     # ── 탭 ────────────────────────────────────────────────
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 차트", "🔢 신호 상세", "🛡️ 손절 관리", "🔍 전종목 스캐너", "🚨 매수 알람", "💼 보유종목 관리"])
 
@@ -1607,6 +1693,45 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
         st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
+        # ── 전일 대비 점수 변화 진단 ──────────────────────
+        if len(d) >= 2:
+            row_prev = d.iloc[-2]
+            g_raw_prev, g_detail_prev = g_score(row_prev)
+            score_diff = g_raw - g_raw_prev
+
+            diff_color = '#22c55e' if score_diff >= 0 else '#ef4444'
+            st.markdown(f"""
+            <div style='background:#0f1623;border:1px solid #1e2a3a;border-radius:8px;
+                padding:0.8rem 1.2rem;margin-bottom:1rem'>
+                <div style='font-size:0.78rem;color:#64748b;margin-bottom:6px'>
+                    전일 대비 G 원점수 변화 ({d.index[-2].strftime('%m/%d')} → {d.index[-1].strftime('%m/%d')})
+                </div>
+                <div style='display:flex;align-items:center;gap:12px'>
+                    <span style='font-family:Space Mono,monospace;color:#64748b'>{g_raw_prev:+.0f}</span>
+                    <span style='color:#475569'>→</span>
+                    <span style='font-family:Space Mono,monospace;font-weight:700;font-size:1.1rem;color:#e2e8f0'>{g_raw:+.0f}</span>
+                    <span style='font-family:Space Mono,monospace;font-weight:700;color:{diff_color}'>({score_diff:+.0f}점)</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 항목별 변화 비교
+            with st.expander("🔍 항목별 변화 상세 보기"):
+                for (name_t, pts_t, kind_t), (name_y, pts_y, kind_y) in zip(g_detail, g_detail_prev):
+                    item_diff = pts_t - pts_y
+                    if item_diff != 0:
+                        diff_c = '#22c55e' if item_diff > 0 else '#ef4444'
+                        st.markdown(
+                            f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
+                            f"border-bottom:1px solid #1e2a3a;font-size:0.85rem'>"
+                            f"<span style='color:#94a3b8'>{name_t}</span>"
+                            f"<span><span style='color:#64748b;font-family:Space Mono,monospace'>{pts_y:+d}→{pts_t:+d}</span> "
+                            f"<span style='color:{diff_c};font-weight:700;font-family:Space Mono,monospace'>({item_diff:+d})</span></span>"
+                            f"</div>", unsafe_allow_html=True
+                        )
+                if all((pts_t - pts_y) == 0 for (_, pts_t, _), (_, pts_y, _) in zip(g_detail, g_detail_prev)):
+                    st.markdown("<div style='color:#475569;font-size:0.85rem'>항목별 변화 없음 — 유니버스 내 다른 종목들의 점수 변화로 인한 순위 변동입니다.</div>", unsafe_allow_html=True)
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown('<div class="sec-hdr">G 신호 구성 요소</div>', unsafe_allow_html=True)
