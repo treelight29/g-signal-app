@@ -222,34 +222,45 @@ def resolve_ticker(query: str) -> tuple[str, str]:
 def fetch(ticker: str, days=400) -> pd.DataFrame:
     end   = datetime.today()
     start = end - timedelta(days=days)
-
-    # 국내주식: FinanceDataReader 사용 (더 정확한 KRX 데이터)
     is_kr = ticker.endswith('.KS') or ticker.endswith('.KQ')
+
+    # 국내주식: FinanceDataReader 사용
     if is_kr and FDR_OK:
         try:
-            # 티커에서 숫자 코드만 추출 (005930.KS → 005930)
             code = ticker.split('.')[0]
-            df = fdr.DataReader(code, start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))
+            # 충분한 기간으로 요청 (당일 데이터 포함 위해 end+1일)
+            end_fdr = end + timedelta(days=1)
+            df = fdr.DataReader(
+                code,
+                start.strftime('%Y-%m-%d'),
+                end_fdr.strftime('%Y-%m-%d')
+            )
             if df is not None and len(df) > 0:
-                # FDR 컬럼명 통일
-                df = df.rename(columns={
-                    'Open': 'Open', 'High': 'High', 'Low': 'Low',
-                    'Close': 'Close', 'Volume': 'Volume',
-                    'Adj Close': 'Close'
-                })
-                # 필요한 컬럼만
-                cols = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
-                return df[cols].dropna()
+                # 컬럼 정리
+                df.columns = [str(c) for c in df.columns]
+                col_map = {}
+                for c in df.columns:
+                    cl = c.lower()
+                    if 'open'   in cl: col_map[c] = 'Open'
+                    elif 'high' in cl: col_map[c] = 'High'
+                    elif 'low'  in cl: col_map[c] = 'Low'
+                    elif 'close'in cl: col_map[c] = 'Close'
+                    elif 'vol'  in cl: col_map[c] = 'Volume'
+                df = df.rename(columns=col_map)
+                needed = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
+                if 'Close' in df.columns:
+                    return df[needed].dropna(subset=['Close'])
         except Exception:
-            pass  # FDR 실패 시 yfinance로 폴백
+            pass
 
     # 미국주식 또는 FDR 실패: yfinance 사용
     df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    if 'Close' not in df.columns and len(df.columns) > 0:
-        return df.dropna()
-    return df[['Open','High','Low','Close','Volume']].dropna()
+    needed = [c for c in ['Open','High','Low','Close','Volume'] if c in df.columns]
+    if not needed:
+        return pd.DataFrame()
+    return df[needed].dropna(subset=['Close'])
 
 @st.cache_data(ttl=300)
 def fetch_tnx() -> pd.Series:
@@ -1465,11 +1476,20 @@ color:#3b82f6;font-weight:600;margin-bottom:0.8rem">
     universe_total = None
 
     if not df_universe.empty:
-        # 전체 유니버스 G 원점수 중 해당 종목 위치 계산
-        all_g_scores = df_universe['g_raw'].values
-        universe_pct  = float((all_g_scores < g_raw).sum() / len(all_g_scores) * 100)
-        universe_rank = int((all_g_scores >= g_raw).sum())
-        universe_total = len(all_g_scores)
+        # ★ 핵심: scan_market 결과에서 해당 종목 점수 직접 사용
+        # (스캔 시점과 개별 분석 시점 데이터 불일치 방지)
+        ticker_row = df_universe[df_universe['ticker'] == ticker]
+        if not ticker_row.empty:
+            # 스캔 결과에 해당 종목이 있으면 그 백분위 직접 사용
+            universe_pct   = float(ticker_row.iloc[0]['percentile'])
+            universe_rank  = int(ticker_row.iloc[0]['rank'])
+            universe_total = len(df_universe)
+        else:
+            # 유니버스에 없는 종목이면 G 원점수로 비교
+            all_g_scores  = df_universe['g_raw'].values
+            universe_pct  = float((all_g_scores < g_raw).sum() / len(all_g_scores) * 100)
+            universe_rank = int((all_g_scores >= g_raw).sum())
+            universe_total = len(all_g_scores)
 
     scores = calc_scores(g_raw, f1_ok, avg_price if has_pos else None, close, atr,
                          universe_pct=universe_pct)
